@@ -83,6 +83,14 @@ export interface TocEntry {
   page: string;
 }
 
+/** What `\ref` and `\pageref` print for a label. */
+export interface LabelRef {
+  /** "2", "3.1"; "" outside any numbered unit. */
+  number: string;
+  /** As LaTeX printed it: "3", "iv". */
+  page: string;
+}
+
 export interface CompileOutcome {
   ok: boolean;
   cancelled: boolean;
@@ -94,6 +102,8 @@ export interface CompileOutcome {
   needsRerun: boolean;
   toc: TocEntry[];
   convertedParts: number;
+  /** Label → printed number and page; empty unless `ok`. */
+  labels: Record<string, LabelRef>;
 }
 
 export type CompileMode = "preview" | "full";

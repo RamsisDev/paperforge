@@ -38,12 +38,11 @@ import {
 import { tags as t } from "@lezer/highlight";
 import katex from "katex";
 import { parseBib, shortAuthors } from "@/lib/bib";
-import type { Part } from "@/lib/api";
-import { labels, levelInChapter, type Labels } from "@/lib/outline";
-import { allText } from "@/lib/parts";
+import { levelInChapter } from "@/lib/outline";
 import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
+import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs";
 import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
 
@@ -114,23 +113,12 @@ const mathTooltip = hoverTooltip(
   { hoverTime: 250 },
 );
 
-const REF_KINDS: Record<string, string> = { fig: "Figure", tbl: "Table", eq: "Equation", sec: "Section" };
-
 let bibCache: { source: string; entries: ReturnType<typeof parseBib> } = { source: "", entries: [] };
 
 function bibEntries() {
   const source = store.get().bib;
   if (source !== bibCache.source) bibCache = { source, entries: parseBib(source) };
   return bibCache.entries;
-}
-
-let labelCache: { parts: Part[]; labels: Labels } = { parts: [], labels: labels("") };
-
-/** Labels from every part: a reference may point into another file. */
-function documentLabels(): Labels {
-  const parts = store.get().parts;
-  if (parts !== labelCache.parts) labelCache = { parts, labels: labels(allText(parts)) };
-  return labelCache.labels;
 }
 
 function citationCompletions(context: CompletionContext): CompletionResult | null {
@@ -145,9 +133,7 @@ function citationCompletions(context: CompletionContext): CompletionResult | nul
     type: "text",
     boost: 1,
   }));
-  for (const [kind, ids] of Object.entries(documentLabels())) {
-    for (const id of ids) options.push({ label: `@${id}`, detail: REF_KINDS[kind], type: "variable" });
-  }
+  options.push(...labelOptions());
   return { from: word.from, options, validFor: /^@[\w:.-]*$/ };
 }
 
@@ -169,10 +155,15 @@ function slashCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/^\s*\/[\w-]*/);
   if (!word) return null;
   const from = word.from + word.text.indexOf("/");
+  // A typed `/ref` belongs to the reference picker.
+  if (context.state.sliceDoc(from, context.pos).startsWith("/ref")) return null;
   return {
     from,
-    options: SLASH_COMMANDS.map((c) => snippetCompletion(c.template, { label: c.label, detail: c.detail, type: "keyword" })),
-    validFor: /^\/[\w-]*$/,
+    options: [
+      ...SLASH_COMMANDS.map((c) => snippetCompletion(c.template, { label: c.label, detail: c.detail, type: "keyword" })),
+      refSlashCommand,
+    ],
+    validFor: (text) => /^\/[\w-]*$/.test(text) && !text.startsWith("/ref"),
   };
 }
 
@@ -371,7 +362,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     chapterTemplate,
     chapterSectionBadges,
     figureTools(),
-    autocompletion({ override: [slashCompletions, citationCompletions, latexCompletions], icons: false }),
+    autocompletion({ override: [slashCompletions, citationCompletions, crossRefCompletions, latexCompletions], icons: false }),
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
     spellCheck,
     onChange,
