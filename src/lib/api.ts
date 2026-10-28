@@ -221,7 +221,96 @@ export const api = {
    */
   blockLatex: (dir: string, part: string, line: number, content: string) =>
     invoke<BlockLatex | null>("block_latex", { dir, part, line, content }),
+  historyStatus: (dir: string) => invoke<HistoryStatus>("history_status", { dir }),
+  /** Starts version history in the project folder (or adopts its git repository). */
+  historyEnable: (dir: string) => invoke<HistoryStatus>("history_enable", { dir }),
+  /** Null when history is off or nothing changed since the last snapshot. */
+  historyAutosave: (dir: string, reason: string | null = null) =>
+    invoke<VersionInfo | null>("history_autosave", { dir, reason }),
+  /**
+   * A `label` also names the version (a milestone); `reason` replaces the automatic summary, e.g.
+   * "PDF exported". Null when nothing changed and there is nothing to name.
+   */
+  historySaveVersion: (dir: string, opts: { label?: string; note?: string; reason?: string } = {}) =>
+    invoke<VersionInfo | null>("history_save_version", {
+      dir,
+      label: opts.label ?? null,
+      note: opts.note ?? null,
+      reason: opts.reason ?? null,
+    }),
+  /** Newest first; `before` is the id of the oldest entry already shown. */
+  historyList: (dir: string, includeAutosaves: boolean, before: string | null, limit: number) =>
+    invoke<VersionInfo[]>("history_list", { dir, includeAutosaves, before, limit }),
+  /** Names a version, or removes its name with null. */
+  historyLabel: (dir: string, id: string, label: string | null) =>
+    invoke<VersionInfo>("history_label", { dir, id, label }),
+  /** From one snapshot to another, or to the working copy when `to` is null. */
+  historyDiff: (dir: string, from: string, to: string | null) => invoke<VersionDiff>("history_diff", { dir, from, to }),
+  historyReadPart: (dir: string, id: string, file: string) => invoke<string>("history_read_part", { dir, id, file }),
+  historyRestore: (dir: string, id: string) => invoke<ProjectSnapshot>("history_restore", { dir, id }),
+  /** Brings one part back, re-inserting it when it was deleted since. */
+  historyRestorePart: (dir: string, id: string, file: string) =>
+    invoke<ProjectSnapshot>("history_restore_part", { dir, id, file }),
 };
+
+/** "own": enabled by PaperForge; "adopted": the folder already was a git repository. */
+export type RepoMode = "own" | "adopted" | "parentRepo" | "none";
+
+export interface HistoryStatus {
+  enabled: boolean;
+  mode: RepoMode;
+  branch: string | null;
+  /** The project differs from the last version. */
+  dirty: boolean;
+  lastVersion: VersionInfo | null;
+  remote: string | null;
+}
+
+export type VersionKind = "autosave" | "version";
+
+export interface VersionInfo {
+  id: string;
+  shortId: string;
+  kind: VersionKind;
+  /** Milestone name, e.g. "Sent to reviewer". */
+  label: string | null;
+  note: string | null;
+  /** e.g. "Edited: Introduction, Method". */
+  summary: string;
+  /** Unix seconds. */
+  time: number;
+  author: string;
+  /** Project-relative files changed since the previous snapshot. */
+  changedParts: string[];
+}
+
+export type ChangeStatus = "added" | "deleted" | "modified" | "renamed";
+
+export interface DiffSegment {
+  kind: "equal" | "insert" | "delete";
+  text: string;
+}
+
+export interface PartDiff {
+  file: string;
+  oldFile: string | null;
+  /** First heading of the part, else its file name. */
+  title: string;
+  status: ChangeStatus;
+  /** The whole text; long unchanged runs are folded by the UI. */
+  segments: DiffSegment[];
+}
+
+export interface VersionDiff {
+  from: string;
+  /** Null: the working copy. */
+  to: string | null;
+  parts: PartDiff[];
+  /** Plain-language changes of the paper settings, e.g. "Title: “A” → “B”". */
+  meta: { field: string; description: string }[];
+  bib: { key: string; status: ChangeStatus }[];
+  files: { path: string; oldPath: string | null; status: ChangeStatus }[];
+}
 
 export interface BlockLatex {
   /** The block's lines in the part's fragment, 1-based and inclusive. */

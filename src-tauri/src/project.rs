@@ -125,12 +125,14 @@ pub fn read_meta(dir: &Path) -> Result<PaperMeta, String> {
     serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn write_meta(dir: &Path, meta: &PaperMeta) -> Result<(), String> {
-    let raw = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+/// Ends with a newline, so the file diffs cleanly in git.
+pub(crate) fn write_meta(dir: &Path, meta: &PaperMeta) -> Result<(), String> {
+    let mut raw = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+    raw.push(b'\n');
     write_atomic(&dir.join(META_FILE), &raw)
 }
 
-fn read_optional(path: &Path) -> Result<String, String> {
+pub(crate) fn read_optional(path: &Path) -> Result<String, String> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -138,7 +140,7 @@ fn read_optional(path: &Path) -> Result<String, String> {
     }
 }
 
-fn remove_optional(path: &Path) -> Result<(), String> {
+pub(crate) fn remove_optional(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
         _ => Ok(()),
@@ -175,7 +177,7 @@ fn is_figure(path: &Path) -> bool {
 }
 
 /// Parts are `/`-separated Markdown paths below the project folder.
-fn check_part_path(file: &str) -> Result<(), String> {
+pub(crate) fn check_part_path(file: &str) -> Result<(), String> {
     let path = Path::new(file);
     let inside = !file.contains('\\')
         && path.components().all(|c| matches!(c, Component::Normal(_)))
@@ -191,7 +193,7 @@ fn part_index(meta: &PaperMeta, file: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("'{file}' is not a part of this document"))
 }
 
-fn write_part(dir: &Path, file: &str, content: &str) -> Result<(), String> {
+pub(crate) fn write_part(dir: &Path, file: &str, content: &str) -> Result<(), String> {
     let path = dir.join(file);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -467,7 +469,7 @@ fn fence_run(line: &str) -> Option<(char, usize, &str)> {
 }
 
 /// The heading text without closing hashes or a trailing `{#id .class}` attribute block.
-fn atx_heading(line: &str, marker: &str) -> Option<String> {
+pub(crate) fn atx_heading(line: &str, marker: &str) -> Option<String> {
     let rest = line.strip_prefix(marker)?;
     if !rest.starts_with([' ', '\t']) {
         return None;
