@@ -1,12 +1,13 @@
+import { isolateHistory } from "@codemirror/commands";
 import { setDiagnostics, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
-import { EditorSelection, EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState, type ChangeSpec, type TransactionSpec } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { editorBridge } from "@/editor/bridge";
 import { bibExtensions, flashLine, markdownExtensions, syncChapterTemplate, texExtensions } from "@/editor/extensions";
 import { locate } from "@/lib/diagnostics";
 import { setBib, setPart } from "@/session";
-import { BIB_FILE, TEX_FILE, store, useStore, type EditorFile } from "@/store";
+import { BIB_FILE, TEX_FILE, openFind, store, useStore, type EditorFile } from "@/store";
 
 type Contents = Map<EditorFile, string>;
 
@@ -49,6 +50,26 @@ export function Editor() {
     return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions });
   }
 
+  /** Edits a file through its own state, so Mod-Z in that file undoes the edit. */
+  function edit(file: EditorFile, changes: ChangeSpec) {
+    const text = contents(store.get()).get(file);
+    if (text === undefined || file === TEX_FILE) return;
+    const spec: TransactionSpec = { changes, userEvent: "input.replace", annotations: isolateHistory.of("full") };
+    const view = viewRef.current;
+    if (view && file === current.current) {
+      view.dispatch(spec);
+      return;
+    }
+    let state = states.current.get(file);
+    if (!state || state.doc.toString() !== text) state = createState(file);
+    const next = state.update(spec).state;
+    states.current.set(file, next);
+    const value = next.doc.toString();
+    emitted.current.set(file, value);
+    if (file === BIB_FILE) setBib(value);
+    else setPart(file, value);
+  }
+
   // One view per project; documents swap underneath it.
   useEffect(() => {
     if (!host.current) return;
@@ -60,13 +81,27 @@ export function Editor() {
     const view = new EditorView({ state: createState(file), parent: host.current });
     viewRef.current = view;
     editorBridge.view = view;
+    editorBridge.edit = edit;
     view.focus();
     return () => {
       view.destroy();
       viewRef.current = null;
       editorBridge.view = null;
+      editorBridge.edit = null;
     };
   }, [dir]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || e.key.toLowerCase() !== "f") return;
+      e.preventDefault();
+      const state = viewRef.current?.state;
+      const selected = state?.sliceDoc(state.selection.main.from, state.selection.main.to);
+      openFind(selected && !selected.includes("\n") ? selected : undefined);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Switch files, keeping each file's undo history and scroll position.
   useEffect(() => {
@@ -156,6 +191,16 @@ export function Editor() {
         requestAnimationFrame(() => {
           if (current.current !== jump.file) return;
           const doc = view.state.doc;
+          if (jump.select) {
+            const to = Math.min(jump.select.to, doc.length);
+            const from = Math.min(jump.select.from, to);
+            view.dispatch({
+              selection: EditorSelection.range(from, to),
+              effects: EditorView.scrollIntoView(from, { y: "center" }),
+            });
+            view.focus();
+            return;
+          }
           const line = doc.line(Math.min(Math.max(jump.line + 1, 1), doc.lines));
           view.dispatch({
             selection: EditorSelection.cursor(line.from),
