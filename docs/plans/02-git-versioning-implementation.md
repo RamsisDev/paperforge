@@ -150,3 +150,25 @@ is an orchestrator decision; a task that needs a change reports it instead.
 Merge 1A, 1B, 1C; full gate; extend `e2e/web-check.mjs` with a history round trip (create, edit,
 save version, compare, restore); write `docs/versioning.md` (how it works, for users and
 developers); update the source plan's markers and this document's status.
+
+## Status (2026-10-28)
+
+Batches 0–2 are merged on `feat/git-versioning`; the three task branches merged without
+conflicts. Gate: build, 248 vitest + 157 Rust unit tests with no warnings; `ui-check` with no page
+errors and typing p50 unchanged (0.2 / 0.3 ms one part / 20x, Source and Writing); `web-check`
+against the real backend: enable from the banner, named version as tag `sent-to-reviewer` with a
+clean `git status`, word-level compare, restore back to the milestone, no page errors.
+
+Decisions taken during the batch:
+- Snapshot times are monotonic (now, or one second after the newest snapshot), so the newest
+  snapshot and the timeline order never depend on clock resolution.
+- An autosave's summary describes the changes since the newest snapshot (which may be a version),
+  not since its git parent; "View changes" compares with the previous timeline entry.
+- A repository without `paperforge.enabled` reports `mode: none`; enabling adopts it.
+- Naming replaces every tag on a version; a version has one name.
+- "Restore this part" is hidden for parts renamed since the compared version (it would come back
+  under the old name next to the renamed one).
+- Exporting a review PDF also records a version ("Review PDF exported").
+
+Follow-ups: session version when quitting the desktop app (`CloseRequested`); the rest of the
+"Known limits" in `docs/versioning.md`; phases F3–F7.

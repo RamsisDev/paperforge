@@ -4,6 +4,9 @@ Goal: non-technical users get Word/Google Docs–style version history (versions
 named milestones such as "sent to reviewer"), while power users keep a real git repository they
 can push to GitHub/GitLab, or publish to Overleaf.
 
+Status: phases F0–F2 are implemented on `feat/git-versioning` (see
+`02-git-versioning-implementation.md`); how it works today is in `../versioning.md`.
+
 Markers: **[V]** verified during research (code read, command run, or prototype in
 `/tmp/pf-git-proto`), **[S]** assumption or untested design. Paths refer to commit `756df5f`.
 
