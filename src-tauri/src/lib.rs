@@ -142,6 +142,16 @@ async fn synctex_to_pdf(state: State<'_, Backend>, dir: String, part: String, li
     state.synctex_to_pdf(&dir, &part, line).await
 }
 
+#[tauri::command]
+async fn dictionary_read(dir: String) -> Result<Vec<String>, String> {
+    project::read_dictionary(Path::new(&dir))
+}
+
+#[tauri::command]
+async fn dictionary_add(dir: String, words: Vec<String>) -> Result<Vec<String>, String> {
+    project::add_to_dictionary(Path::new(&dir), &words)
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -192,6 +202,8 @@ pub fn run() {
             export_zip,
             synctex_to_source,
             synctex_to_pdf,
+            dictionary_read,
+            dictionary_add,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

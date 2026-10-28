@@ -6,6 +6,7 @@
 //! refs.bib     BibTeX references
 //! figures/     images referenced from the parts
 //! .build/      generated paper.tex, part-*.tex fragments, paper.pdf and logs (safe to delete)
+//! .paperforge/ project settings kept with the paper, e.g. dictionary.txt (one word per line)
 //! ```
 
 use std::collections::HashSet;
@@ -24,6 +25,8 @@ pub const SECTIONS_DIR: &str = "sections";
 pub const BIB_FILE: &str = "refs.bib";
 pub const FIGURES_DIR: &str = "figures";
 pub const BUILD_DIR: &str = ".build";
+pub const SETTINGS_DIR: &str = ".paperforge";
+pub const DICTIONARY_FILE: &str = "dictionary.txt";
 
 const FIGURE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "pdf"];
 const SLUG_MAX_CHARS: usize = 48;
@@ -563,6 +566,65 @@ pub fn export_zip(dir: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `.paperforge/dictionary.txt` of a project; a settings folder or file that is a link could
+/// point outside the project, so those are refused.
+fn dictionary_path(dir: &Path) -> Result<PathBuf, String> {
+    if !dir.join(META_FILE).is_file() {
+        return Err(format!("{} is not a PaperForge project (no {META_FILE})", dir.display()));
+    }
+    let settings = dir.join(SETTINGS_DIR);
+    let path = settings.join(DICTIONARY_FILE);
+    for p in [&settings, &path] {
+        if fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("{} is a link out of the project", p.display()));
+        }
+    }
+    Ok(path)
+}
+
+/// Non-empty trimmed lines, first occurrence only.
+fn dictionary_words(raw: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw.lines()
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && seen.insert(*w))
+        .map(String::from)
+        .collect()
+}
+
+/// The project's own words for the spell checker.
+pub fn read_dictionary(dir: &Path) -> Result<Vec<String>, String> {
+    Ok(dictionary_words(&read_optional(&dictionary_path(dir)?)?))
+}
+
+/// Appends the words the project dictionary does not have yet and returns the whole list.
+pub fn add_to_dictionary(dir: &Path, words: &[String]) -> Result<Vec<String>, String> {
+    let path = dictionary_path(dir)?;
+    let mut raw = read_optional(&path)?;
+    let mut known = dictionary_words(&raw);
+    let mut added = String::new();
+    for word in words.iter().map(|w| w.trim()) {
+        if word.is_empty() || word.contains(|c: char| c.is_whitespace() || c.is_control()) {
+            return Err(format!("'{word}' is not a single word"));
+        }
+        if !known.iter().any(|k| k == word) {
+            known.push(word.to_string());
+            added.push_str(word);
+            added.push('\n');
+        }
+    }
+    if added.is_empty() {
+        return Ok(known);
+    }
+    fs::create_dir_all(dir.join(SETTINGS_DIR)).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        raw.push('\n');
+    }
+    raw.push_str(&added);
+    write_atomic(&path, raw.as_bytes())?;
+    Ok(known)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,5 +854,63 @@ mod tests {
         assert_eq!(meta.template, "article");
         assert_eq!(meta.toc_depth, 2);
         assert!(meta.parts.is_empty() && !meta.toc);
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn dictionary_appends_new_words_once() {
+        let tmp = blank();
+        assert!(read_dictionary(tmp.path()).unwrap().is_empty());
+        assert!(!tmp.path().join(SETTINGS_DIR).exists());
+
+        let list = add_to_dictionary(tmp.path(), &words(&["PaperForge", " Tectonic ", "PaperForge"])).unwrap();
+        assert_eq!(list, ["PaperForge", "Tectonic"]);
+        let path = tmp.path().join(SETTINGS_DIR).join(DICTIONARY_FILE);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "PaperForge\nTectonic\n");
+
+        fs::write(&path, "Pandoc\n\n  Pandoc\nLaTeX").unwrap();
+        let list = add_to_dictionary(tmp.path(), &words(&["latex", "LaTeX"])).unwrap();
+        assert_eq!(list, ["Pandoc", "LaTeX", "latex"]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Pandoc\n\n  Pandoc\nLaTeX\nlatex\n");
+        assert_eq!(read_dictionary(tmp.path()).unwrap(), ["Pandoc", "LaTeX", "latex"]);
+    }
+
+    #[test]
+    fn dictionary_rejects_non_words_and_non_projects() {
+        let tmp = blank();
+        for bad in ["two words", "line\nbreak", "", "tab\there"] {
+            assert!(add_to_dictionary(tmp.path(), &words(&[bad])).is_err(), "{bad:?}");
+        }
+        assert!(read_dictionary(tmp.path()).unwrap().is_empty());
+        let plain = tempfile::tempdir().unwrap();
+        assert!(read_dictionary(plain.path()).is_err());
+        assert!(add_to_dictionary(plain.path(), &words(&["word"])).is_err());
+        assert!(!plain.path().join(SETTINGS_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dictionary_refuses_links_out_of_the_project() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join(DICTIONARY_FILE), "secret\n").unwrap();
+
+        let tmp = blank();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join(SETTINGS_DIR)).unwrap();
+        assert!(read_dictionary(tmp.path()).is_err());
+        assert!(add_to_dictionary(tmp.path(), &words(&["word"])).is_err());
+
+        let tmp = blank();
+        fs::create_dir(tmp.path().join(SETTINGS_DIR)).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join(DICTIONARY_FILE),
+            tmp.path().join(SETTINGS_DIR).join(DICTIONARY_FILE),
+        )
+        .unwrap();
+        assert!(read_dictionary(tmp.path()).is_err());
+        assert!(add_to_dictionary(tmp.path(), &words(&["word"])).is_err());
+        assert_eq!(fs::read_to_string(outside.path().join(DICTIONARY_FILE)).unwrap(), "secret\n");
     }
 }

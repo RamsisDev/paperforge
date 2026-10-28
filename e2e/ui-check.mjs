@@ -167,6 +167,11 @@ function stubTauri(fixture) {
           return window.__pfSynctexSource ?? null;
         case "synctex_to_pdf":
           return window.__pfSynctexPdf ?? null;
+        case "dictionary_read":
+          return state.dictionary ?? [];
+        case "dictionary_add":
+          state.dictionary = [...new Set([...(state.dictionary ?? []), ...args.words])];
+          return state.dictionary;
         default:
           return null;
       }
@@ -466,6 +471,22 @@ console.log(
   `· undo in ${notOpen} ${JSON.stringify(afterUndoNotOpen)} · undo in ${inView} ${JSON.stringify(afterUndoInView)}`,
 );
 await page.getByRole("tab", { name: "Structure", exact: true }).click();
+// Spell check: a misspelled word gets suggestions, and adding it to the project dictionary clears it.
+const typo = () => page.locator(".pf-spell", { hasText: "sentense" }).first();
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\n\nThis sentense has a typo. ");
+await typo().waitFor({ timeout: 10000 });
+await typo().hover();
+await page.locator(".pf-spell-suggestions button").first().waitFor({ timeout: 10000 });
+await shot("22-spell-suggestions");
+console.log("spell suggestions:", JSON.stringify(await page.locator(".pf-spell-suggestions button").allTextContents()));
+await page.getByRole("button", { name: "Add to project dictionary" }).click();
+await typo().waitFor({ state: "detached", timeout: 5000 });
+console.log(
+  "after adding to the project dictionary:",
+  JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "dictionary_add").map((c) => c.args.words))),
+);
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer.

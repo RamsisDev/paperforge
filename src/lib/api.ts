@@ -136,6 +136,9 @@ export const api = {
   /** Where a Markdown line (1-based) of a part was typeset; null without SyncTeX data. */
   synctexToPdf: (dir: string, part: string, line: number) =>
     invoke<PdfBox | null>("synctex_to_pdf", { dir, part, line }),
+  readDictionary: (dir: string) => invoke<string[]>("dictionary_read", { dir }),
+  /** Appends new words to the project dictionary; returns the whole list. */
+  addToDictionary: (dir: string, words: string[]) => invoke<string[]>("dictionary_add", { dir, words }),
 };
 
 export interface FolderListing {

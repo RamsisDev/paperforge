@@ -268,6 +268,11 @@ impl Backend {
             part: String,
             line: usize,
         }
+        #[derive(Deserialize)]
+        struct DictionaryAdd {
+            dir: String,
+            words: Vec<String>,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -344,13 +349,18 @@ impl Backend {
                 let a: PartLine = parse(args)?;
                 json(self.synctex_to_pdf(&a.dir, &a.part, a.line).await?)
             }
+            "dictionary_read" => json(project::read_dictionary(Path::new(&parse::<Dir>(args)?.dir))?),
+            "dictionary_add" => {
+                let a: DictionaryAdd = parse(args)?;
+                json(project::add_to_dictionary(Path::new(&a.dir), &a.words)?)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 20] = [
+pub const COMMANDS: [&str; 22] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -371,6 +381,8 @@ pub const COMMANDS: [&str; 20] = [
     "export_zip",
     "synctex_to_source",
     "synctex_to_pdf",
+    "dictionary_read",
+    "dictionary_add",
 ];
 
 #[cfg(test)]
