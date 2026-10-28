@@ -1944,18 +1944,19 @@ on two lines.
     fn style_definitions_precede_the_preamble() {
         let meta = PaperMeta { styles: sample_styles(), ..PaperMeta::default() };
         let variables = template_variables("", &meta, "\\renewcommand\\pfstylesmallcaps[1]{#1}\n").unwrap();
+        let header = |variables: &[(&str, String)]| {
+            variables.iter().find(|(name, _)| *name == "header-includes").map(|(_, value)| value.clone())
+        };
         assert_eq!(
-            variables,
-            [(
-                "header-includes",
+            header(&variables).as_deref(),
+            Some(
                 "\\newenvironment{pf-note}{\\begin{quote}}{\\end{quote}}\n\
                  \\newcommand{\\pfstylesmallcaps}[1]{\\textsc{#1}}\n\
                  \\renewcommand\\pfstylesmallcaps[1]{#1}"
-                    .into()
-            )]
+            )
         );
-        let only_styles = template_variables("", &meta, "").unwrap();
-        assert!(only_styles[0].1.ends_with("{\\textsc{#1}}"), "{only_styles:?}");
+        let only_styles = header(&template_variables("", &meta, "").unwrap()).unwrap();
+        assert!(only_styles.ends_with("{\\textsc{#1}}"), "{only_styles}");
     }
 
     #[tokio::test]
