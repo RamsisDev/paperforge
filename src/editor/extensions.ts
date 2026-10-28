@@ -43,6 +43,7 @@ import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
 import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs";
+import { grammarCheck } from "./grammar";
 import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
 import { markdownFolding } from "./folding";
@@ -375,6 +376,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     autocompletion({ override: [slashCompletions, citationCompletions, crossRefCompletions, latexCompletions], icons: false }),
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
     spellCheck,
+    grammarCheck,
     editorModeExtension(),
     showLatex,
     onChange,

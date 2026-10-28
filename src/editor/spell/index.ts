@@ -1,8 +1,9 @@
 import { syntaxTree } from "@codemirror/language";
-import { forEachDiagnostic, lintGutter, setDiagnostics, setDiagnosticsEffect, type Diagnostic } from "@codemirror/lint";
-import { Annotation, EditorState, type Extension } from "@codemirror/state";
+import { forEachDiagnostic, type Diagnostic } from "@codemirror/lint";
+import type { Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { LANGUAGES } from "@/lib/templates";
+import { backgroundDiagnostics, publishSpec } from "../backgroundLint";
 import { misspelled, suggestions } from "./client";
 import type { DictionarySource } from "./protocol";
 import {
@@ -18,11 +19,8 @@ import { isListed, spellTokens, type SpellToken } from "./tokens";
 export { setSpellCheck, spellCheckEnabled, onSpellSettings } from "./settings";
 export { dictionaryFor } from "./dictionaries";
 
-const SOURCE = "spelling";
+export const SPELLING_SOURCE = "spelling";
 const DEBOUNCE_MS = 350;
-
-/** Marks the transactions that publish spelling results, so the merge filter leaves them alone. */
-const spellUpdate = Annotation.define<boolean>();
 
 const live = new Set<SpellPlugin>();
 onSpellSettings(() => {
@@ -33,7 +31,7 @@ onSpellSettings(() => {
 function currentRange(view: EditorView, word: string, near: number): { from: number; to: number } | null {
   let best: { from: number; to: number } | null = null;
   forEachDiagnostic(view.state, (d, from, to) => {
-    if (d.source !== SOURCE || view.state.sliceDoc(from, to) !== word) return;
+    if (d.source !== SPELLING_SOURCE || view.state.sliceDoc(from, to) !== word) return;
     if (!best || Math.abs(from - near) < Math.abs(best.from - near)) best = { from, to };
   });
   return best;
@@ -73,7 +71,7 @@ function spellingDiagnostic(dictionary: DictionarySource, token: SpellToken): Di
     from: token.from,
     to: token.to,
     severity: "info",
-    source: SOURCE,
+    source: SPELLING_SOURCE,
     markClass: "pf-spell",
     message,
     renderMessage: (view) => renderMessage(view, dictionary, token, message),
@@ -147,15 +145,8 @@ class SpellPlugin {
   }
 
   private publish(found: Diagnostic[]) {
-    const { state } = this.view;
-    const others: Diagnostic[] = [];
-    let previous = 0;
-    forEachDiagnostic(state, (d, from, to) => {
-      if (d.source === SOURCE) previous++;
-      else others.push({ ...d, from, to });
-    });
-    if (!previous && !found.length) return;
-    this.view.dispatch({ ...setDiagnostics(state, [...others, ...found]), annotations: spellUpdate.of(true) });
+    const spec = publishSpec(this.view.state, SPELLING_SOURCE, found);
+    if (spec) this.view.dispatch(spec);
   }
 
   destroy() {
@@ -164,26 +155,6 @@ class SpellPlugin {
     live.delete(this);
   }
 }
-
-/**
- * The lint state holds one list of diagnostics; whoever sets it (the compile diagnostics in the
- * editor) would drop the spelling marks, so they are carried over into every other update.
- */
-const keepSpelling = EditorState.transactionFilter.of((tr) => {
-  if (!tr.effects.length || tr.annotation(spellUpdate)) return tr;
-  let incoming: readonly Diagnostic[] | null = null;
-  for (const e of tr.effects) if (e.is(setDiagnosticsEffect)) incoming = e.value;
-  if (!incoming) return tr;
-  const spelling: Diagnostic[] = [];
-  forEachDiagnostic(tr.startState, (d, from, to) => {
-    if (d.source !== SOURCE) return;
-    const f = tr.changes.mapPos(from, 1);
-    const t = tr.changes.mapPos(to, -1);
-    if (f < t) spelling.push({ ...d, from: f, to: t });
-  });
-  if (!spelling.length) return tr;
-  return [tr, { effects: setDiagnosticsEffect.of([...incoming, ...spelling]), sequential: true }];
-});
 
 const theme = EditorView.baseTheme({
   ".cm-lintRange.pf-spell": {
@@ -197,9 +168,4 @@ const theme = EditorView.baseTheme({
 });
 
 /** Offline spell check of the prose in a Markdown part, reported as lint diagnostics. */
-export const spellCheck: Extension = [
-  ViewPlugin.fromClass(SpellPlugin),
-  keepSpelling,
-  lintGutter({ markerFilter: (diagnostics) => diagnostics.filter((d) => d.source !== SOURCE) }),
-  theme,
-];
+export const spellCheck: Extension = [ViewPlugin.fromClass(SpellPlugin), backgroundDiagnostics({ source: SPELLING_SOURCE }), theme];
