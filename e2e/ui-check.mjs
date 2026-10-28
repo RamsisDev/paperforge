@@ -1002,7 +1002,7 @@ console.log("second comment asks for the name again:", await addBox.getByLabel("
 await addBox.getByLabel("Comment").fill("Say numbered?");
 await addBox.getByLabel("Comment").press("ControlOrMeta+Enter");
 await settle(200);
-await page.getByRole("tab", { name: "Comments", exact: true }).click();
+await page.getByRole("tab", { name: "Review", exact: true }).click();
 const commentCards = () => page.getByRole("list", { name: "Comments" }).getByRole("listitem");
 await commentCards().first().waitFor({ timeout: 5000 });
 await settle(200);
@@ -1051,14 +1051,91 @@ console.log("export review PDF:", JSON.stringify(await page.evaluate(() => windo
 await page.getByRole("button", { name: "Review", exact: true }).click();
 await settle(600);
 console.log("review off, last compile review:", await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1).args.review));
+
+// Track changes: with the toolbar toggle on, typed text becomes an insertion and backspaced text
+// a deletion; the Review panel accepts one and rejects the other; Mod-Z takes back a tracked edit
+// in one step; Review compiles with `review`.
+const placeCursor = (after) =>
+  page.evaluate(async (after) => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    const view = EditorView.findFromDOM(document.querySelector(".cm-editor"));
+    const at = view.state.doc.toString().indexOf(after) + after.length;
+    view.dispatch({ selection: { anchor: at } });
+    view.focus();
+  }, after);
+const rawLine = async () => (await editorText()).split("\n").find((l) => l.startsWith("Raw LaTeX"));
+const trackButton = page.getByRole("button", { name: "Track changes", exact: true });
+await trackButton.click();
+await settle(200);
+console.log(
+  "track changes toggle:",
+  await trackButton.getAttribute("aria-pressed"),
+  "· stored:",
+  JSON.stringify(await page.evaluate(() => Object.entries(localStorage).filter(([k]) => k.startsWith("paperforge.trackChanges:")))),
+);
+await placeCursor("untouched");
+await page.keyboard.type(" and safe", { delay: 20 });
+await placeCursor("untouched and safe]");
+await settle(100);
+const afterTyping = await rawLine();
+await placeCursor("when");
+for (let i = 0; i < 4; i++) await page.keyboard.press("Backspace");
+await settle(200);
+console.log("tracked Markdown:", JSON.stringify(await rawLine()), "· after typing:", JSON.stringify(afterTyping));
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+console.log("undo takes back the tracked deletion:", JSON.stringify(await rawLine()));
+await page.keyboard.press("ControlOrMeta+Shift+z");
+await settle(200);
+console.log("redo:", JSON.stringify(await rawLine()));
+await modeButton("Writing").click();
+await page.locator(".cm-line", { hasText: "Inline math works" }).click({ position: { x: 60, y: 8 } });
+await page.locator(".pf-insertion").first().waitFor({ timeout: 5000 });
+await page.locator(".pf-insertion").first().scrollIntoViewIfNeeded();
+await page.locator(".pf-insertion").first().hover();
+await page.getByRole("group", { name: "Tracked change" }).waitFor({ timeout: 5000 });
+await shot("27-track-changes-writing");
+console.log(
+  "writing mode changes: inserted",
+  JSON.stringify(await page.locator(".pf-insertion").allTextContents()),
+  "· deleted",
+  JSON.stringify(await page.locator(".pf-deletion").allTextContents()),
+  "· raw line shown:",
+  JSON.stringify(await page.locator(".cm-line", { hasText: "Raw LaTeX" }).first().textContent()),
+);
+await modeButton("Source").click();
+await settle(200);
+await page.getByRole("tab", { name: "Review", exact: true }).click();
+const changeCards = (kind) => page.getByRole("listitem", { name: new RegExp(`^${kind} by `) });
+await changeCards("Insertion").first().waitFor({ timeout: 5000 });
+await settle(200);
+await shot("27b-review-panel");
+console.log(
+  "review panel changes:",
+  JSON.stringify(await page.getByRole("region", { name: "Changes" }).getByRole("listitem").evaluateAll((cards) => cards.map((c) => c.innerText.replace(/\s+/g, " ").trim()))),
+);
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await page.waitForFunction(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1)?.args.review === true, null, { timeout: 5000 });
+console.log("review compile with tracked changes:", JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1).args)));
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await settle(300);
+await changeCards("Insertion").first().getByRole("button", { name: "Accept change" }).click();
+await settle(200);
+await changeCards("Deletion").first().getByRole("button", { name: "Reject change" }).click();
+await settle(200);
+console.log("after accept insertion and reject deletion:", JSON.stringify(await rawLine()), "· cards left:", await changeCards("(Insertion|Deletion)").count());
+await trackButton.click();
+await settle(200);
+console.log("track changes off:", await trackButton.getAttribute("aria-pressed"));
 await page.getByRole("tab", { name: "Structure", exact: true }).click();
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer, with the cursor in view, in Source and Writing mode.
 await editorTabs().first().click();
 await settle(300);
-async function typingCost(repeat) {
-  return page.evaluate(async (repeat) => {
+async function typingCost(repeat, tracked = false) {
+  return page.evaluate(async ({ repeat, tracked }) => {
     // The same pre-bundled module instance the app loaded, so findFromDOM sees its views.
     const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
     const { EditorView } = await import(url);
@@ -1077,7 +1154,8 @@ async function typingCost(repeat) {
     po.observe({ type: "longtask" });
     for (let i = 0; i < 300; i++) {
       const t = performance.now();
-      view.dispatch(view.state.replaceSelection(i % 40 === 39 ? "\n" : "x"));
+      const spec = view.state.replaceSelection(i % 40 === 39 ? "\n" : "x");
+      view.dispatch(tracked ? { ...spec, userEvent: "input.type" } : spec);
       sync.push(performance.now() - t);
       if (i % 10 === 0) await new Promise((r) => requestAnimationFrame(r));
     }
@@ -1088,7 +1166,7 @@ async function typingCost(repeat) {
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: original } });
     await new Promise((r) => setTimeout(r, 300));
     return { lines, p50: sync[150].toFixed(2), p95: sync[285].toFixed(2), max: sync[299].toFixed(2), longTasks };
-  }, repeat);
+  }, { repeat, tracked });
 }
 for (const mode of ["Source", "Writing"]) {
   await modeButton(mode).click();
@@ -1096,6 +1174,15 @@ for (const mode of ["Source", "Writing"]) {
   console.log(`typing, ${mode} mode, one part (ms/keystroke):`, JSON.stringify(await typingCost(1)));
   console.log(`typing, ${mode} mode, 20x part (ms/keystroke):`, JSON.stringify(await typingCost(20)));
 }
+// The same keystrokes as typed input with Track changes on, so each one goes through tracking.
+await trackButton.click();
+for (const mode of ["Source", "Writing"]) {
+  await modeButton(mode).click();
+  await settle(300);
+  console.log(`typing tracked, ${mode} mode, one part (ms/keystroke):`, JSON.stringify(await typingCost(1, true)));
+  console.log(`typing tracked, ${mode} mode, 20x part (ms/keystroke):`, JSON.stringify(await typingCost(20, true)));
+}
+await trackButton.click();
 await modeButton("Source").click();
 await settle(800);
 
