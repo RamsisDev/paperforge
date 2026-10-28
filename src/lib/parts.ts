@@ -1,5 +1,6 @@
-import type { Part } from "./api";
+import type { Part, TemplateId } from "./api";
 import { headings, wordCount, type Heading } from "./outline";
+import { usesChapters } from "./templates";
 import { bestLine, words } from "./textmatch";
 
 export interface PartLine {
@@ -81,6 +82,31 @@ export function splitLevel(part: Part): 1 | 2 | null {
 export function isLongPart(part: Part): boolean {
   const info = partInfo(part);
   return (info.words > LONG_PART_WORDS || info.levels[1] >= 3) && splitLevel(part) !== null;
+}
+
+export interface SplitHint {
+  level: 1 | 2;
+  /** Later `#` headings a chapter template typesets as sections; 0 when the part is just long. */
+  demoted: number;
+}
+
+/** Headings after the first one at its level, which a chapter template typesets one level deeper. */
+export function demotedHeadings(part: Part): number {
+  const [first, ...rest] = partInfo(part).headings;
+  return first ? rest.filter((h) => h.level === first.level).length : 0;
+}
+
+/**
+ * Whether, and where, to suggest splitting a part. In a chapter template, several `#` headings
+ * in one chapter file suggest chapters written as sections, so they are offered as chapters.
+ */
+export function splitHint(part: Part, template: TemplateId | undefined): SplitHint | null {
+  if (usesChapters(template) && partInfo(part).headings[0]?.level === 1) {
+    const demoted = demotedHeadings(part);
+    if (demoted >= 2 || (demoted === 1 && partInfo(part).words > LONG_PART_WORDS)) return { level: 1, demoted };
+  }
+  const level = splitLevel(part);
+  return level && isLongPart(part) ? { level, demoted: 0 } : null;
 }
 
 /** The best-matching line for `needle` in any part; parts are searched independently. */

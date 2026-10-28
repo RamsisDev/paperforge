@@ -304,6 +304,55 @@ async fn aborted_compile_kills_tex_and_leaves_a_usable_build() {
     assert!(after.ok, "{:#?}", after.diagnostics);
 }
 
+const MARCO_TEXT: &str = "# Marco Teorico\n\nAlgun texto Sasdasd\n\n# Subtema\n\nTexto 2\nadasd\n";
+
+fn project_with_marco(template: &str) -> tempfile::TempDir {
+    let tmp = sample_project(template, "");
+    project::create_part(tmp.path(), usize::MAX, "Marco Teorico").unwrap();
+    let part = project::read_meta(tmp.path()).unwrap().parts.pop().unwrap();
+    project::save_part(tmp.path(), &part, MARCO_TEXT).unwrap();
+    tmp
+}
+
+fn toc_entry<'a>(outcome: &'a CompileOutcome, title: &str) -> &'a compiler::TocEntry {
+    outcome
+        .toc
+        .iter()
+        .find(|e| e.list == "toc" && e.title == title)
+        .unwrap_or_else(|| panic!("no toc entry {title}: {:#?}", outcome.toc))
+}
+
+/// In chapter templates a part is one chapter: a second `#` in the same file is a section of it,
+/// on the same page, not a new chapter.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn later_top_level_headings_of_a_chapter_part_are_its_sections() {
+    for template in ["report", "book"] {
+        let tmp = project_with_marco(template);
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert_eq!(top_level_numbers(&outcome, "chapter"), ["1", "2", "3", "4"], "{template}");
+
+        let chapter = toc_entry(&outcome, "Marco Teorico");
+        let section = toc_entry(&outcome, "Subtema");
+        assert_eq!((chapter.level.as_str(), chapter.number.as_str()), ("chapter", "4"), "{template}");
+        assert_eq!((section.level.as_str(), section.number.as_str()), ("section", "4.1"), "{template}");
+        assert_eq!(section.page, chapter.page, "{template}: {:#?}", outcome.toc);
+        let results = toc_entry(&outcome, "Results");
+        assert_eq!((results.level.as_str(), results.number.as_str()), ("section", "2.1"), "{template}");
+        for e in [chapter, section] {
+            println!("{template:<6} {:<8} {:<4} {:<14} page {}", e.level, e.number, e.title, e.page);
+        }
+    }
+
+    let tmp = project_with_marco("article");
+    let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+    assert!(outcome.ok, "article: {:#?}", errors(&outcome));
+    assert_eq!(top_level_numbers(&outcome, "section"), ["1", "2", "3", "4", "5"], "{:#?}", outcome.toc);
+    assert_eq!(toc_entry(&outcome, "Marco Teorico").number, "4");
+    assert_eq!(toc_entry(&outcome, "Subtema").number, "5");
+}
+
 #[tokio::test]
 #[ignore = "runs the TeX toolchain"]
 async fn latex_errors_point_at_the_fragment_line() {

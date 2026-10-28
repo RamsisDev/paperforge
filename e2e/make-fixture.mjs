@@ -12,8 +12,9 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const out = resolve(process.argv[2] ?? "/tmp/pf-multipart");
-// The baseline commit's single-file sample and templates: stable while the backend changes.
-const head = (path) => execFileSync("git", ["show", `HEAD:${path}`], { cwd: root, encoding: "utf8" });
+// The single-file MVP commit's sample and templates: stable while the backend changes.
+const BASELINE = "192cdd4";
+const head = (path) => execFileSync("git", ["show", `${BASELINE}:${path}`], { cwd: root, encoding: "utf8" });
 const sample = "src-tauri/resources/sample";
 const templates = "src-tauri/resources/templates";
 const triple = execFileSync("rustc", ["-vV"], { encoding: "utf8" }).match(/host: (\S+)/)?.[1] ?? "aarch64-apple-darwin";

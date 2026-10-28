@@ -11,15 +11,16 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
-import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
+import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { lintGutter, lintKeymap } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { EditorState, StateEffect, StateField, type Extension, type Range } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   MatchDecorator,
   ViewPlugin,
+  WidgetType,
   crosshairCursor,
   drawSelection,
   dropCursor,
@@ -38,8 +39,9 @@ import { tags as t } from "@lezer/highlight";
 import katex from "katex";
 import { parseBib, shortAuthors } from "@/lib/bib";
 import type { Part } from "@/lib/api";
-import { labels, type Labels } from "@/lib/outline";
+import { labels, levelInChapter, type Labels } from "@/lib/outline";
 import { allText } from "@/lib/parts";
+import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
 
@@ -219,6 +221,104 @@ const flashField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+/** Whether the project's template typesets each part as one chapter. */
+export const setChapterTemplate = StateEffect.define<boolean>();
+
+const chapterTemplate = StateField.define<boolean>({
+  create: () => usesChapters(store.get().meta?.template),
+  update: (value, tr) => tr.effects.reduce((v, e) => (e.is(setChapterTemplate) ? e.value : v), value),
+});
+
+/** Brings the view's chapter-template flag in line with the project; states may predate a template change. */
+export function syncChapterTemplate(view: EditorView) {
+  const current = view.state.field(chapterTemplate, false);
+  const chapters = usesChapters(store.get().meta?.template);
+  if (current !== undefined && current !== chapters) view.dispatch({ effects: setChapterTemplate.of(chapters) });
+}
+
+const LATEX_LEVELS = ["", "chapter", "section", "subsection", "subsubsection", "paragraph", "subparagraph"];
+
+class SectionOfWidget extends WidgetType {
+  constructor(readonly label: string) {
+    super();
+  }
+  eq(other: SectionOfWidget) {
+    return other.label === this.label;
+  }
+  toDOM() {
+    const dom = document.createElement("span");
+    dom.className = "pf-section-of";
+    dom.textContent = this.label;
+    return dom;
+  }
+}
+
+function atxLevel(name: string): number {
+  return name.startsWith("ATXHeading") ? Number(name.slice(10)) : 0;
+}
+
+/**
+ * In a chapter template, marks the later headings at the first heading's level, which are typeset
+ * one level deeper. Only top-level syntax nodes in the visible ranges are visited.
+ */
+function chapterSections(view: EditorView): DecorationSet {
+  const { state } = view;
+  if (!state.field(chapterTemplate) || view.visibleRanges.length === 0) return Decoration.none;
+  const tree = syntaxTree(state);
+  const end = view.visibleRanges[view.visibleRanges.length - 1].to;
+  const cursor = tree.cursor();
+  let first: { level: number; from: number; to: number } | null = null;
+  if (cursor.firstChild()) {
+    do {
+      const level = atxLevel(cursor.name);
+      if (level) first = { level, from: cursor.from, to: cursor.to };
+    } while (!first && cursor.from < end && cursor.nextSibling());
+  }
+  if (!first) return Decoration.none;
+  const chapter = first;
+  const title = state
+    .sliceDoc(chapter.from, chapter.to)
+    .replace(/^\s*#{1,6}\s*/, "")
+    .replace(/\s*\{[^}]*\}\s*$/, "")
+    .replace(/\s+#+\s*$/, "");
+  const widget = new SectionOfWidget(`${LATEX_LEVELS[levelInChapter(chapter.level, chapter.level)]} of “${title}”`);
+  const marks: Range<Decoration>[] = [];
+  for (const { from, to } of view.visibleRanges) {
+    tree.iterate({
+      from,
+      to,
+      enter: (node) => {
+        if (node.type.isTop) return true;
+        if (node.from > chapter.from && atxLevel(node.name) === chapter.level) {
+          marks.push(Decoration.widget({ widget, side: 1 }).range(state.doc.lineAt(node.from).to));
+        }
+        return false;
+      },
+    });
+  }
+  return Decoration.set(marks, true);
+}
+
+const chapterSectionBadges = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = chapterSections(view);
+    }
+    update(u: ViewUpdate) {
+      if (
+        u.docChanged ||
+        u.viewportChanged ||
+        syntaxTree(u.state) !== syntaxTree(u.startState) ||
+        u.state.field(chapterTemplate) !== u.startState.field(chapterTemplate)
+      ) {
+        this.decorations = chapterSections(u.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
+
 const formattingKeymap = keymap.of([
   { key: "Mod-b", run: formatting.bold },
   { key: "Mod-i", run: formatting.italic },
@@ -266,6 +366,8 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     markRegex(/\[@[^\]\n]+\]|(?<![\w\\])@[\w:.-]*\w/g, "pf-cite"),
     markRegex(/\{[#.][^}\n]*\}/g, "pf-attr"),
     mathTooltip,
+    chapterTemplate,
+    chapterSectionBadges,
     autocompletion({ override: [slashCompletions, citationCompletions, latexCompletions], icons: false }),
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
     onChange,

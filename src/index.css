@@ -229,6 +229,21 @@ textarea,
 :root .cm-editor .cm-diagnostic {
   font-family: var(--font-sans);
 }
+:root .cm-editor .pf-section-of {
+  display: inline-block;
+  max-width: 24em;
+  margin-left: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1;
+  vertical-align: -0.1em;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--pf-faint);
+  pointer-events: none;
+}
 
 /* PDF preview */
 .pf-page {

@@ -1,4 +1,5 @@
 -- Paper conventions on top of Pandoc Markdown:
+--   one part = one chapter    -> in chapter templates, later `#` headings of a part are sections
 --   @fig:x / @tbl:x / @sec:x  -> \ref{...}      @eq:x -> \eqref{...}
 --   $$ ... $$ {#eq:x}         -> numbered equation with \label
 --   {.wide} on a figure/table -> spans both columns (figure* / table*)
@@ -29,6 +30,28 @@ local numeric_only = false
 
 local function read_meta(meta)
   numeric_only = meta["numeric-only-citations"] == true
+end
+
+-- Set for the parts of chapter templates, where a part is one chapter. Every later heading at
+-- the level of the part's first heading becomes its child (one level deeper, at most 6), so a
+-- second `#` is a section of the chapter rather than a new chapter. Deeper headings keep their
+-- level: a `##` already means a section. Identifiers and classes are untouched, and Pandoc
+-- assigned the automatic ones while reading.
+local function scope_headings_to_file(doc)
+  if doc.meta["file-scoped-headings"] ~= true then
+    return nil
+  end
+  local first_level = nil
+  return doc:walk({
+    Header = function(h)
+      if first_level == nil then
+        first_level = h.level
+      elseif h.level == first_level then
+        h.level = math.min(h.level + 1, 6)
+        return h
+      end
+    end,
+  })
 end
 
 local function Cite(el)
@@ -199,6 +222,6 @@ local function Table(tbl)
 end
 
 return {
-  { Meta = read_meta },
+  { Meta = read_meta, Pandoc = scope_headings_to_file },
   { Cite = Cite, Para = Para, Figure = Figure, Table = Table },
 }

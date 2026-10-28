@@ -27,6 +27,10 @@ const fixture = {
   figures: readdirSync(join(projectDir, "figures")).map((f) => `figures/${f}`),
   toc: JSON.parse(readFileSync(join(projectDir, ".build/toc.json"), "utf8")),
 };
+// A chapter whose later `#` the report template typesets as one of its sections.
+const MARCO = "sections/marco-teorico.md";
+fixture.parts.push({ file: MARCO, content: "# Marco Teorico\nAlgun texto\n# Subtema\nTexto 2\n## Detalle\n" });
+fixture.meta.parts.push(MARCO);
 
 function stubTauri(fixture) {
   const calls = [];
@@ -225,6 +229,33 @@ await page.locator("li.group").nth(1).hover();
 await settle(200);
 await shot("06-structure");
 
+// A later `#` in a chapter part: nested under the chapter in its card, marked in the editor.
+const marcoCard = () => page.locator("li.group", { hasText: "Marco Teorico" });
+const badges = () => page.locator(".pf-section-of").allTextContents();
+async function cardOutline() {
+  return marcoCard().evaluate((card) => {
+    const title = [...card.querySelectorAll("span")].find((s) => s.textContent === "Marco Teorico");
+    const left = (el) => Math.round(el.getBoundingClientRect().left);
+    const textLeft = (b) => {
+      const range = document.createRange();
+      range.selectNodeContents(b);
+      return Math.round(range.getBoundingClientRect().left);
+    };
+    const items = [...card.querySelectorAll("ul button")].map((b) => `${b.textContent}@+${textLeft(b) - left(title)}px`);
+    return `${title.textContent}@0 > ${items.join(", ")}`;
+  });
+}
+await marcoCard().getByTitle(`Open ${MARCO}`).click({ position: { x: 16, y: 12 } });
+await page.locator(".pf-section-of").first().waitFor({ timeout: 5000 });
+await page.mouse.move(5, 890);
+await settle(300);
+await marcoCard().screenshot({ path: join(outDir, "06b-chapter-card.png") });
+const editorBox = await page.locator(".cm-editor").boundingBox();
+await page.screenshot({ path: join(outDir, "06c-chapter-badge.png"), clip: { ...editorBox, height: 200 } });
+await shot("06d-chapter-workspace");
+console.log("chapter card (text x relative to the title):", await cardOutline());
+console.log("chapter badges:", JSON.stringify(await badges()));
+
 // A contents entry opens the PDF at its page and the Markdown at its heading.
 await page.getByRole("list", { name: "Table of contents" }).getByRole("button", { name: /Results/ }).click();
 await settle(900);
@@ -355,6 +386,21 @@ const overflow = await page.evaluate(() => {
 });
 console.log("toolbar buttons clipped at 1100px:", overflow.length ? overflow : "none");
 await page.setViewportSize({ width: 1440, height: 900 });
+
+// The chapter rule follows the template: none in an article, back in the report.
+async function pickTemplate(current, next) {
+  await page.locator("footer").getByRole("button", { name: current }).click();
+  await page.getByRole("dialog", { name: "Change template" }).getByRole("radio", { name: new RegExp(next) }).click();
+  await settle(400);
+}
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+await marcoCard().getByTitle(`Open ${MARCO}`).click({ position: { x: 16, y: 12 } });
+await settle(300);
+await pickTemplate("Thesis / Report", "^Article");
+console.log("article: badges", JSON.stringify(await badges()), "· card", await cardOutline());
+await shot("21b-article-chapter-card");
+await pickTemplate("Article", "Thesis \\/ Report");
+console.log("report again: badges", JSON.stringify(await badges()), "· card", await cardOutline());
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer.

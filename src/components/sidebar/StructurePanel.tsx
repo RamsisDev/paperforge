@@ -2,10 +2,10 @@ import { ArrowDown, ArrowUp, ChevronRight, Lightbulb, Merge, Plus, Scissors, Set
 import { Fragment, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { insertInline } from "@/editor/commands";
 import { withEditor } from "@/editor/bridge";
-import { baseName, type Part, type TocEntry } from "@/lib/api";
-import { labels } from "@/lib/outline";
-import { allText, bestLineInParts, findHeading, isLongPart, partInfo, partTitle, splitLevel } from "@/lib/parts";
-import { unitName } from "@/lib/templates";
+import { baseName, type Part, type TemplateId, type TocEntry } from "@/lib/api";
+import { labels, withEffectiveLevels, type EffectiveHeading } from "@/lib/outline";
+import { allText, bestLineInParts, findHeading, partInfo, partTitle, splitHint, splitLevel } from "@/lib/parts";
+import { unitName, usesChapters } from "@/lib/templates";
 import { arabicPage, tocIndents, tocLists } from "@/lib/toc";
 import { createPart, deletePart, mergeWithNext, movePart, splitPart } from "@/session";
 import { askNewPart, jumpTo, openFile, revealPage, showContentsSettings, store, useStore } from "@/store";
@@ -160,21 +160,28 @@ function PartCard({
   count,
   active,
   unit,
+  template,
 }: {
   part: Part;
   index: number;
   count: number;
   active: boolean;
   unit: string;
+  template: TemplateId | undefined;
 }) {
   const info = partInfo(part);
   const title = partTitle(part);
   const level = splitLevel(part);
+  const hint = splitHint(part, template);
+  const chapters = usesChapters(template);
   const [prompt, setPrompt] = useState<Prompt>(null);
-  const titled = info.headings[0]?.text === title;
-  const subheadings = titled ? info.headings.slice(1) : info.headings;
-  const baseLevel = Math.min(...subheadings.map((h) => h.level));
+  const hs = useMemo(() => withEffectiveLevels(info.headings, chapters), [info, chapters]);
+  const titled = hs[0]?.text === title;
+  const subheadings = titled ? hs.slice(1) : hs;
+  const baseLevel = Math.min(...subheadings.map((h) => h.effectiveLevel));
   const canSplit = { 1: info.levels[1] >= 2, 2: info.levels[2] >= 2 };
+  const demotedTitle = (h: EffectiveHeading) =>
+    titled && h.effectiveLevel !== h.level ? `${h.text} — written as ${"#".repeat(h.level)}, a subtopic of “${title}”` : h.text;
 
   function split() {
     if (canSplit[1] && canSplit[2]) setPrompt(prompt === "split" ? null : "split");
@@ -206,14 +213,14 @@ function PartCard({
       </button>
 
       {subheadings.length > 0 && (
-        <ul className="pb-1.5">
+        <ul aria-label={`Headings of ${title}`} className={cx(chapters && titled ? "mb-2 ml-6 mr-2 border-l border-line" : "pb-1.5")}>
           {subheadings.map((h) => (
             <li key={`${h.line}-${h.text}`}>
               <button
                 onClick={() => jumpTo(part.file, h.line)}
                 className="block w-full truncate py-0.5 pr-2 text-left text-[12px] text-muted hover:bg-raised hover:text-fg cursor-default"
-                style={{ paddingLeft: 24 + (h.level - baseLevel) * 12 }}
-                title={h.text}
+                style={{ paddingLeft: (chapters && titled ? 8 : 24) + (h.effectiveLevel - baseLevel) * 12 }}
+                title={demotedTitle(h)}
               >
                 {h.text}
               </button>
@@ -222,15 +229,24 @@ function PartCard({
         </ul>
       )}
 
-      {isLongPart(part) && level && prompt === null && (
+      {hint && prompt === null && (
         <div className="mx-2 mb-2 flex items-center gap-2 rounded-md bg-raised px-2 py-1.5 text-[11px] text-muted">
           <Lightbulb size={12} className="shrink-0 text-warn" />
           <span className="flex-1">
-            Long {unit} — split it {level === 1 ? `into ${unit}s` : "at its ## headings"}?
+            {hint.demoted > 0 ? (
+              <>
+                {hint.demoted} subtopic{hint.demoted === 1 ? " uses" : "s use"} <code className="font-mono">#</code> — make{" "}
+                {hint.demoted === 1 ? "it a chapter" : "them chapters"}?
+              </>
+            ) : (
+              <>
+                Long {unit} — split it {hint.level === 1 ? `into ${unit}s` : "at its ## headings"}?
+              </>
+            )}
           </span>
           <button
             className="shrink-0 font-medium text-accent hover:underline cursor-default"
-            onClick={() => run(() => splitPart(part.file, level))}
+            onClick={() => run(() => splitPart(part.file, hint.level))}
           >
             Split
           </button>
@@ -361,7 +377,7 @@ export function StructurePanel() {
           {parts.map((part, i) => (
             <Fragment key={part.file}>
               {adding === i && <NewPartInput index={i} unit={unit} />}
-              <PartCard part={part} index={i} count={parts.length} active={part.file === activeFile} unit={unit} />
+              <PartCard part={part} index={i} count={parts.length} active={part.file === activeFile} unit={unit} template={template} />
             </Fragment>
           ))}
           {adding !== null && adding >= parts.length && <NewPartInput index={parts.length} unit={unit} />}

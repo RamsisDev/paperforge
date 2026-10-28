@@ -3,7 +3,7 @@ import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { editorBridge } from "@/editor/bridge";
-import { bibExtensions, flashLine, markdownExtensions, texExtensions } from "@/editor/extensions";
+import { bibExtensions, flashLine, markdownExtensions, syncChapterTemplate, texExtensions } from "@/editor/extensions";
 import { locate } from "@/lib/diagnostics";
 import { setBib, setPart } from "@/session";
 import { BIB_FILE, TEX_FILE, store, useStore, type EditorFile } from "@/store";
@@ -81,6 +81,7 @@ export function Editor() {
       next = createState(activeFile);
     }
     view.setState(next);
+    syncChapterTemplate(view);
     current.current = activeFile;
     requestAnimationFrame(() => (view.scrollDOM.scrollTop = scroll.current.get(activeFile) ?? 0));
     applyLint();
@@ -136,6 +137,14 @@ export function Editor() {
   }
 
   useEffect(() => useStore.subscribe((s, prev) => s.diagnostics !== prev.diagnostics && applyLint()), []);
+
+  useEffect(
+    () =>
+      useStore.subscribe((s, prev) => {
+        if (s.meta?.template !== prev.meta?.template && viewRef.current) syncChapterTemplate(viewRef.current);
+      }),
+    [],
+  );
 
   // Jump requests from the structure tab, problems panel and the PDF preview.
   useEffect(

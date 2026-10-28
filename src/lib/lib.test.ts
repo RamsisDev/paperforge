@@ -2,17 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { Part, TocEntry } from "./api";
 import { parseBib, shortAuthors } from "./bib";
 import { locate } from "./diagnostics";
-import { headings, labels, wordCount } from "./outline";
+import { effectiveHeadings, headings, labels, levelInChapter, wordCount } from "./outline";
 import {
   LONG_PART_WORDS,
   allText,
   bestLineInParts,
+  demotedHeadings,
   findHeading,
   findInParts,
   isLongPart,
   partInfo,
   partStem,
   partTitle,
+  splitHint,
   splitLevel,
   totalWords,
 } from "./parts";
@@ -68,6 +70,51 @@ describe("outline", () => {
 
   it("counts prose words only", () => {
     expect(wordCount("# Title\n\nHello *big* world.\n\n```\ncode here\n```\n$$a+b$$")).toBe(4);
+  });
+});
+
+describe("effectiveHeadings", () => {
+  const levels = (source: string, template: Parameters<typeof effectiveHeadings>[1]) =>
+    effectiveHeadings(source, template).map((h) => [h.text, h.level, h.effectiveLevel]);
+  const chapter = "# Marco Teorico\nAlgun texto\n# Subtema\nTexto 2\n## Detalle\n";
+
+  it("typesets a later # in a chapter part as a section of that chapter", () => {
+    expect(levels(chapter, "report")).toEqual([
+      ["Marco Teorico", 1, 1],
+      ["Subtema", 1, 2],
+      ["Detalle", 2, 2],
+    ]);
+    expect(levels(chapter, "book")).toEqual(levels(chapter, "report"));
+  });
+
+  it("shifts only headings at the first heading's level", () => {
+    expect(levels("## A\n### Deep\n## B\n# Top\n", "report")).toEqual([
+      ["A", 2, 2],
+      ["Deep", 3, 3],
+      ["B", 2, 3],
+      ["Top", 1, 1],
+    ]);
+  });
+
+  it("ignores headings in code fences", () => {
+    expect(levels("# A\n```md\n# Not a heading\n```\n# B\n", "report")).toEqual([
+      ["A", 1, 1],
+      ["B", 1, 2],
+    ]);
+  });
+
+  it("keeps every level in templates without chapters", () => {
+    for (const template of ["article", "ieee", "acm", "elsevier", "lncs", undefined] as const) {
+      expect(levels(chapter, template)).toEqual([
+        ["Marco Teorico", 1, 1],
+        ["Subtema", 1, 1],
+        ["Detalle", 2, 2],
+      ]);
+    }
+  });
+
+  it("matches what typesets one level deeper per heading", () => {
+    expect([levelInChapter(1, 1), levelInChapter(2, 1), levelInChapter(1, 2), levelInChapter(6, 6)]).toEqual([2, 2, 1, 6]);
   });
 });
 
@@ -162,6 +209,25 @@ describe("parts", () => {
     expect(isLongPart(crowded)).toBe(true);
     expect(isLongPart(subsections)).toBe(false);
     expect(isLongPart(long)).toBe(false);
+  });
+
+  it("offers a chapter's # subtopics as chapters, in chapter templates only", () => {
+    const one = { file: "a.md", content: "# Marco Teorico\nAlgun texto\n# Subtema\nTexto 2\n## Detalle\n" };
+    const two = { file: "b.md", content: "# A\n\nx\n\n# B\n\ny\n\n# C\n\nz\n" };
+    const longOne = { file: "c.md", content: `# A\n\n${"word ".repeat(LONG_PART_WORDS + 1)}\n\n# B\n` };
+    const sections = { file: "d.md", content: `# A\n\n## One\n\n${"word ".repeat(LONG_PART_WORDS + 1)}\n\n## Two\n` };
+    expect(demotedHeadings(one)).toBe(1);
+    expect(splitHint(one, "report")).toBeNull();
+    expect(splitHint(two, "report")).toEqual({ level: 1, demoted: 2 });
+    expect(splitHint(longOne, "book")).toEqual({ level: 1, demoted: 1 });
+    expect(splitHint(sections, "report")).toEqual({ level: 2, demoted: 0 });
+    expect(splitHint(two, "article")).toEqual({ level: 1, demoted: 0 });
+    expect(splitHint(one, "article")).toBeNull();
+  });
+
+  it("finds a heading a chapter template typesets one level deeper", () => {
+    const parts = [...PARTS, { file: "sections/marco.md", content: "# Marco Teorico\nAlgun texto\n# Subtema\nTexto 2\n" }];
+    expect(findHeading(parts, "Subtema")).toEqual({ file: "sections/marco.md", line: 2 });
   });
 });
 

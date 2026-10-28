@@ -34,7 +34,7 @@ const FRAGMENT_PREFIX: &str = "part-";
 const FRAGMENT_EXTENSIONS: [&str; 6] = ["tex", "aux", "bbl", "blg", "hash", "pandoc"];
 const FRAGMENT_INTERMEDIATES: [&str; 3] = ["aux", "bbl", "blg"];
 /// Part of every conversion cache key: bump it when the Pandoc command lines change.
-const PANDOC_ARGS_VERSION: &str = "1";
+const PANDOC_ARGS_VERSION: &str = "2";
 
 const PANDOC_TIMEOUT: Duration = Duration::from_secs(30);
 const TEX_OFFLINE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -495,6 +495,10 @@ fn pandoc_fragment(tc: &Toolchain, dir: &Path, fragment: &Fragment, options: Fra
             "--top-level-division={}",
             if options.chapters { "chapter" } else { "section" }
         ));
+    if options.chapters {
+        // One part is one chapter: the filter turns its later top-level headings into sections.
+        cmd.arg("--metadata=file-scoped-headings:true");
+    }
     if options.numeric_only {
         cmd.arg("--metadata=numeric-only-citations:true");
     }
@@ -1296,6 +1300,49 @@ mod tests {
         let chapters = convert(FragmentOptions { chapters: true, numeric_only: false }).await;
         assert_eq!(chapters.converted, 2);
         assert!(std::fs::read_to_string(build.join("part-a.tex")).unwrap().contains("\\chapter{A}"));
+    }
+
+    #[tokio::test]
+    async fn chapter_parts_turn_later_top_level_headings_into_sections() {
+        let tc = dev_toolchain();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let build = project::build_dir(dir);
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            dir.join("a.md"),
+            "Before.\n\n# Marco Teorico\n\nAlgun texto\n\n# Subtema\n\n## Detalle\n\n\
+             ```\n# not a heading\n```\n\n# Anexo {#sec:anexo .unnumbered}\n",
+        )
+        .unwrap();
+        let frags = fragments(&["a.md".into()]);
+        let convert = |chapters| {
+            let (tc, frags, build) = (&tc, &frags, &build);
+            async move {
+                let options = FragmentOptions { chapters, numeric_only: false };
+                let conversion = convert_parts(tc, dir, build, frags, options, "test").await.unwrap();
+                assert!(conversion.ok, "{:?}", conversion.diagnostics);
+                std::fs::read_to_string(build.join("part-a.tex")).unwrap()
+            }
+        };
+
+        let report = convert(true).await;
+        for expected in [
+            "Before.",
+            "\\chapter{Marco Teorico}\\label{marco-teorico}",
+            "\\section{Subtema}\\label{subtema}",
+            "\\section{Detalle}\\label{detalle}",
+            "# not a heading",
+            "\\section*{Anexo}\\label{sec:anexo}",
+        ] {
+            assert!(report.contains(expected), "{expected} in\n{report}");
+        }
+        assert_eq!(report.matches("\\chapter").count(), 1, "{report}");
+
+        let article = convert(false).await;
+        for expected in ["\\section{Marco Teorico}", "\\section{Subtema}", "\\subsection{Detalle}"] {
+            assert!(article.contains(expected), "{expected} in\n{article}");
+        }
     }
 
     #[tokio::test]
