@@ -1,8 +1,9 @@
-import { BookOpen, Images, ListTree, MessageSquare, Search, Settings2 } from "lucide-react";
+import { BookOpen, History, Images, ListTree, MessageSquare, Search, Settings2 } from "lucide-react";
 import { store, useStore, type SidebarTab } from "@/store";
 import { CommentsPanel } from "./sidebar/CommentsPanel";
 import { FiguresPanel } from "./sidebar/FiguresPanel";
 import { FindPanel } from "./sidebar/FindPanel";
+import { HistoryPanel } from "./sidebar/HistoryPanel";
 import { PaperPanel } from "./sidebar/PaperPanel";
 import { ReferencesPanel } from "./sidebar/ReferencesPanel";
 import { StructurePanel } from "./sidebar/StructurePanel";
@@ -15,6 +16,7 @@ const PANELS: Record<SidebarTab, () => React.ReactNode> = {
   figures: FiguresPanel,
   find: FindPanel,
   comments: CommentsPanel,
+  history: HistoryPanel,
 };
 
 export function Sidebar() {
@@ -34,6 +36,7 @@ export function Sidebar() {
           { id: "figures", label: "Figures", icon: <Images size={13} /> },
           { id: "find", label: "Find", icon: <Search size={13} /> },
           { id: "comments", label: "Review", icon: <MessageSquare size={13} /> },
+          { id: "history", label: "History", icon: <History size={13} /> },
         ]}
       />
       <div key={tab} className="min-h-0 flex-1 overflow-auto">

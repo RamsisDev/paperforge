@@ -3,10 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { dialectFor, grammarEnabled, onGrammarSettings, setGrammarCheck } from "@/editor/grammar";
 import { dictionaryFor, onSpellSettings, setSpellCheck, spellCheckEnabled } from "@/editor/spell";
 import type { Part, TemplateId } from "@/lib/api";
+import { versionDate, whenLabel } from "@/lib/history";
 import { partInfo, totalWords } from "@/lib/parts";
 import { LANGUAGES, templateInfo, unitName } from "@/lib/templates";
 import { goalProgress, onWordGoals, sessionWords, setWordGoals, wordGoals, type WordGoals } from "@/lib/wordGoals";
-import { openGallery, store, useStore } from "@/store";
+import { openGallery, openHistory, store, useStore } from "@/store";
 import { Button, Field, Input } from "./ui";
 
 /** Counting waits for a pause in typing. */
@@ -183,6 +184,20 @@ function WordCounter({ template, activeFile }: { template: TemplateId | undefine
   );
 }
 
+function LastVersion() {
+  const last = useStore((s) => (s.historyStatus?.enabled ? s.historyStatus.lastVersion : null));
+  if (!last) return null;
+  return (
+    <button
+      className="rounded px-1 hover:bg-raised hover:text-fg cursor-default"
+      title={`${last.label ? `${last.label}: ` : ""}${last.summary}. Click to open the version history`}
+      onClick={openHistory}
+    >
+      Last version {whenLabel(versionDate(last))}
+    </button>
+  );
+}
+
 export function StatusBar() {
   const compile = useStore((s) => s.compile);
   const diagnostics = useStore((s) => s.diagnostics);
@@ -234,6 +249,7 @@ export function StatusBar() {
       <span className={saveState === "error" ? "text-danger" : ""} title={saveError ?? undefined}>
         {saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : "Saving…"}
       </span>
+      <LastVersion />
       <div className="flex-1" />
       <WordCounter template={meta?.template} activeFile={activeFile} />
       <span className="tabular-nums">

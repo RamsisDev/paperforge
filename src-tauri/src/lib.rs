@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod bibfetch;
 pub mod compiler;
+pub mod history;
 pub mod layout;
 pub mod markers;
 pub mod project;
@@ -12,14 +13,17 @@ pub mod zotero;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::ipc::Response;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
-use backend::{Backend, EngineInfo};
+use backend::{Backend, EngineInfo, Reply};
 use bibfetch::Lookup;
 use compiler::{CompileMode, CompileOutcome, Toolchain};
-use project::{PaperMeta, ProjectSnapshot};
+use project::PaperMeta;
+use serde_json::{Value, json};
 use showlatex::BlockLatex;
 use synctex::{PdfBox, SourceSpot};
 
@@ -39,6 +43,15 @@ fn startup_project(state: State<'_, Backend>) -> Option<String> {
     state.startup_project.clone()
 }
 
+/// Runs a command through `Backend::dispatch`, which holds the project lock and records autosaves
+/// before destructive structure changes.
+async fn delegate(state: &Backend, command: &str, args: Value) -> Result<Value, String> {
+    match state.dispatch(command, args).await? {
+        Reply::Json(value) => Ok(value),
+        Reply::Bytes(_) => Err(format!("{command} returned bytes")),
+    }
+}
+
 #[tauri::command]
 async fn project_create(
     state: State<'_, Backend>,
@@ -47,54 +60,59 @@ async fn project_create(
     title: String,
     language: String,
     sample: bool,
-) -> Result<ProjectSnapshot, String> {
-    let sample_dir = sample.then_some(state.sample_dir.as_path());
-    project::create(Path::new(&dir), sample_dir, &template, &title, &language)
+) -> Result<Value, String> {
+    let args = json!({"dir": dir, "template": template, "title": title, "language": language, "sample": sample});
+    delegate(&state, "project_create", args).await
 }
 
 #[tauri::command]
-async fn project_open(dir: String) -> Result<ProjectSnapshot, String> {
-    project::open(Path::new(&dir))
+async fn project_open(state: State<'_, Backend>, dir: String) -> Result<Value, String> {
+    delegate(&state, "project_open", json!({"dir": dir})).await
 }
 
 #[tauri::command]
-async fn project_save(dir: String, meta: Option<PaperMeta>, bib: Option<String>) -> Result<(), String> {
-    project::save(Path::new(&dir), meta.as_ref(), bib.as_deref())
+async fn project_save(
+    state: State<'_, Backend>,
+    dir: String,
+    meta: Option<PaperMeta>,
+    bib: Option<String>,
+) -> Result<Value, String> {
+    delegate(&state, "project_save", json!({"dir": dir, "meta": meta, "bib": bib})).await
 }
 
 #[tauri::command]
-async fn part_save(dir: String, file: String, content: String) -> Result<(), String> {
-    project::save_part(Path::new(&dir), &file, &content)
+async fn part_save(state: State<'_, Backend>, dir: String, file: String, content: String) -> Result<Value, String> {
+    delegate(&state, "part_save", json!({"dir": dir, "file": file, "content": content})).await
 }
 
 #[tauri::command]
-async fn part_create(dir: String, index: usize, title: String) -> Result<ProjectSnapshot, String> {
-    project::create_part(Path::new(&dir), index, &title)
+async fn part_create(state: State<'_, Backend>, dir: String, index: usize, title: String) -> Result<Value, String> {
+    delegate(&state, "part_create", json!({"dir": dir, "index": index, "title": title})).await
 }
 
 #[tauri::command]
-async fn part_delete(dir: String, file: String) -> Result<ProjectSnapshot, String> {
-    project::delete_part(Path::new(&dir), &file)
+async fn part_delete(state: State<'_, Backend>, dir: String, file: String) -> Result<Value, String> {
+    delegate(&state, "part_delete", json!({"dir": dir, "file": file})).await
 }
 
 #[tauri::command]
-async fn parts_reorder(dir: String, parts: Vec<String>) -> Result<ProjectSnapshot, String> {
-    project::reorder_parts(Path::new(&dir), &parts)
+async fn parts_reorder(state: State<'_, Backend>, dir: String, parts: Vec<String>) -> Result<Value, String> {
+    delegate(&state, "parts_reorder", json!({"dir": dir, "parts": parts})).await
 }
 
 #[tauri::command]
-async fn part_split(dir: String, file: String, level: u8) -> Result<ProjectSnapshot, String> {
-    project::split_part(Path::new(&dir), &file, level)
+async fn part_split(state: State<'_, Backend>, dir: String, file: String, level: u8) -> Result<Value, String> {
+    delegate(&state, "part_split", json!({"dir": dir, "file": file, "level": level})).await
 }
 
 #[tauri::command]
-async fn parts_merge(dir: String, files: Vec<String>) -> Result<ProjectSnapshot, String> {
-    project::merge_parts(Path::new(&dir), &files)
+async fn parts_merge(state: State<'_, Backend>, dir: String, files: Vec<String>) -> Result<Value, String> {
+    delegate(&state, "parts_merge", json!({"dir": dir, "files": files})).await
 }
 
 #[tauri::command]
-async fn figure_import(dir: String, source: String) -> Result<String, String> {
-    project::import_figure(Path::new(&dir), Path::new(&source))
+async fn figure_import(state: State<'_, Backend>, dir: String, source: String) -> Result<Value, String> {
+    delegate(&state, "figure_import", json!({"dir": dir, "source": source})).await
 }
 
 #[tauri::command]
@@ -165,28 +183,28 @@ async fn dictionary_read(dir: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn dictionary_add(dir: String, words: Vec<String>) -> Result<Vec<String>, String> {
-    project::add_to_dictionary(Path::new(&dir), &words)
+async fn dictionary_add(state: State<'_, Backend>, dir: String, words: Vec<String>) -> Result<Value, String> {
+    delegate(&state, "dictionary_add", json!({"dir": dir, "words": words})).await
 }
 
 #[tauri::command]
-async fn figure_import_bytes(dir: String, name: String, data: String) -> Result<String, String> {
-    project::import_figure_bytes(Path::new(&dir), &name, &data)
+async fn figure_import_bytes(state: State<'_, Backend>, dir: String, name: String, data: String) -> Result<Value, String> {
+    delegate(&state, "figure_import_bytes", json!({"dir": dir, "name": name, "data": data})).await
 }
 
 #[tauri::command]
-async fn preamble_save(dir: String, content: String) -> Result<(), String> {
-    project::save_preamble(Path::new(&dir), &content)
+async fn preamble_save(state: State<'_, Backend>, dir: String, content: String) -> Result<Value, String> {
+    delegate(&state, "preamble_save", json!({"dir": dir, "content": content})).await
 }
 
 #[tauri::command]
-async fn template_eject(state: State<'_, Backend>, dir: String) -> Result<ProjectSnapshot, String> {
-    project::eject_template(Path::new(&dir), &state.toolchain.templates)
+async fn template_eject(state: State<'_, Backend>, dir: String) -> Result<Value, String> {
+    delegate(&state, "template_eject", json!({"dir": dir})).await
 }
 
 #[tauri::command]
-async fn template_restore(dir: String) -> Result<ProjectSnapshot, String> {
-    project::restore_template(Path::new(&dir))
+async fn template_restore(state: State<'_, Backend>, dir: String) -> Result<Value, String> {
+    delegate(&state, "template_restore", json!({"dir": dir})).await
 }
 
 #[tauri::command]
@@ -200,8 +218,8 @@ async fn zotero_linked(dir: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn zotero_link(dir: String, path: Option<String>) -> Result<Option<String>, String> {
-    zotero::link(Path::new(&dir), path.as_deref())
+async fn zotero_link(state: State<'_, Backend>, dir: String, path: Option<String>) -> Result<Value, String> {
+    delegate(&state, "zotero_link", json!({"dir": dir, "path": path})).await
 }
 
 #[tauri::command]
@@ -231,6 +249,119 @@ async fn block_latex(dir: String, part: String, line: usize, content: Option<Str
     showlatex::block_latex(Path::new(&dir), &part, line, content).await
 }
 
+#[tauri::command]
+async fn history_status(state: State<'_, Backend>, dir: String) -> Result<Value, String> {
+    delegate(&state, "history_status", json!({"dir": dir})).await
+}
+
+#[tauri::command]
+async fn history_enable(state: State<'_, Backend>, dir: String) -> Result<Value, String> {
+    delegate(&state, "history_enable", json!({"dir": dir})).await
+}
+
+#[tauri::command]
+async fn history_autosave(state: State<'_, Backend>, dir: String, reason: Option<String>) -> Result<Value, String> {
+    delegate(&state, "history_autosave", json!({"dir": dir, "reason": reason})).await
+}
+
+#[tauri::command]
+async fn history_save_version(
+    state: State<'_, Backend>,
+    dir: String,
+    label: Option<String>,
+    note: Option<String>,
+    reason: Option<String>,
+) -> Result<Value, String> {
+    delegate(&state, "history_save_version", json!({"dir": dir, "label": label, "note": note, "reason": reason})).await
+}
+
+#[tauri::command]
+async fn history_list(
+    state: State<'_, Backend>,
+    dir: String,
+    include_autosaves: bool,
+    before: Option<String>,
+    limit: usize,
+) -> Result<Value, String> {
+    let args = json!({"dir": dir, "includeAutosaves": include_autosaves, "before": before, "limit": limit});
+    delegate(&state, "history_list", args).await
+}
+
+#[tauri::command]
+async fn history_label(state: State<'_, Backend>, dir: String, id: String, label: Option<String>) -> Result<Value, String> {
+    delegate(&state, "history_label", json!({"dir": dir, "id": id, "label": label})).await
+}
+
+#[tauri::command]
+async fn history_diff(state: State<'_, Backend>, dir: String, from: String, to: Option<String>) -> Result<Value, String> {
+    delegate(&state, "history_diff", json!({"dir": dir, "from": from, "to": to})).await
+}
+
+#[tauri::command]
+async fn history_read_part(state: State<'_, Backend>, dir: String, id: String, file: String) -> Result<Value, String> {
+    delegate(&state, "history_read_part", json!({"dir": dir, "id": id, "file": file})).await
+}
+
+#[tauri::command]
+async fn history_restore(state: State<'_, Backend>, dir: String, id: String) -> Result<Value, String> {
+    delegate(&state, "history_restore", json!({"dir": dir, "id": id})).await
+}
+
+#[tauri::command]
+async fn history_restore_part(state: State<'_, Backend>, dir: String, id: String, file: String) -> Result<Value, String> {
+    delegate(&state, "history_restore_part", json!({"dir": dir, "id": id, "file": file})).await
+}
+
+/// Sent to the frontend before the app quits, so it saves and records the session first.
+const QUIT_EVENT: &str = "quit-requested";
+/// How long the frontend has to answer with `app_quit` before the app quits anyway.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+/// The menu's own Quit item: the predefined one ends the process without asking the frontend.
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "quit";
+
+/// Set once the frontend has been asked to get ready to quit.
+#[derive(Default)]
+struct QuitRequested(AtomicBool);
+
+/// Closing the window and Quit both come here; the frontend answers with `app_quit`.
+fn request_quit(app: &AppHandle) {
+    if app.state::<QuitRequested>().0.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if app.emit(QUIT_EVENT, ()).is_err() {
+        return app.exit(0);
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(QUIT_GRACE).await;
+        app.exit(0);
+    });
+}
+
+#[tauri::command]
+fn app_quit(app: AppHandle) {
+    app.exit(0);
+}
+
+/// The default menu with its Quit item replaced by one that goes through `request_quit`.
+#[cfg(target_os = "macos")]
+fn menu_with_quit(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let is_quit = |item: &MenuItemKind<tauri::Wry>| {
+            matches!(item, MenuItemKind::Predefined(p) if p.text().is_ok_and(|t| t.trim_start_matches('&').starts_with("Quit")))
+        };
+        if let Some(at) = app_menu.items()?.iter().position(is_quit) {
+            let text = format!("Quit {}", app.package_info().name);
+            app_menu.remove_at(at)?;
+            app_menu.insert(&MenuItem::with_id(app, QUIT_MENU_ID, text, true, Some("CmdOrCtrl+Q"))?, at)?;
+        }
+    }
+    Ok(menu)
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -254,12 +385,27 @@ pub fn run() {
         .setup(|app| {
             app.manage(build_backend(app.handle())?);
             app.manage(ZoteroWatch::default());
+            app.manage(QuitRequested::default());
+            #[cfg(target_os = "macos")]
+            app.set_menu(menu_with_quit(app.handle())?)?;
             // Seed the TeX cache while the user is still picking a project.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = handle.state::<Backend>().ensure_cache().await;
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                request_quit(window.app_handle());
+            }
+        })
+        .on_menu_event(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if _event.id() == QUIT_MENU_ID {
+                request_quit(_app);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             engine_info,
@@ -294,6 +440,17 @@ pub fn run() {
             zotero_read,
             zotero_watch,
             block_latex,
+            history_status,
+            history_enable,
+            history_autosave,
+            history_save_version,
+            history_list,
+            history_label,
+            history_diff,
+            history_read_part,
+            history_restore,
+            history_restore_part,
+            app_quit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

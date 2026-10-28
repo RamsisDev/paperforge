@@ -2,6 +2,7 @@ import {
   Asterisk,
   Bold,
   BookOpen,
+  BookmarkPlus,
   ChevronDown,
   Code,
   FileArchive,
@@ -265,6 +266,15 @@ export function Toolbar() {
         title="Review: the preview and Typeset show comments with their notes and tracked changes. Export PDF stays final, with every change accepted."
       >
         <MessageSquareText size={14} /> <span className="hidden xl:inline">Review</span>
+      </Button>
+      <Button
+        variant="ghost"
+        className="shrink-0"
+        aria-label="Save version"
+        onClick={() => store.set({ versionDialog: true })}
+        title={`Save version: keep the paper as it is now, optionally named (${MOD}${SHIFT}S)`}
+      >
+        <BookmarkPlus size={14} /> <span className="hidden xl:inline">Save version</span>
       </Button>
       <Button
         variant="primary"

@@ -139,6 +139,14 @@ export function setWindowTitle(title: string) {
   void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title));
 }
 
+/**
+ * Desktop: `handler` runs when the window is closed or the app is quit, and must end by calling
+ * `app_quit`; the backend quits on its own a few seconds later otherwise.
+ */
+export function onQuitRequested(handler: () => void) {
+  if (isDesktop) void import("@tauri-apps/api/event").then(({ listen }) => listen("quit-requested", handler));
+}
+
 /** Shows a project file in the OS file manager; returns false where that is not possible. */
 export async function revealInFileManager(path: string): Promise<boolean> {
   if (!isDesktop) return false;

@@ -2,6 +2,7 @@
 // Browser mode against the real backend (no IPC stub): `npm run web -- <project>` must be running.
 // Usage: node e2e/web-check.mjs <project-dir> <out-dir>
 
+import { execFileSync } from "node:child_process";
 import { mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
@@ -45,6 +46,48 @@ const [download] = await Promise.all([
   page.getByRole("button", { name: /Export/ }).click().then(() => page.getByRole("menuitem", { name: /^PDF/ }).click()),
 ]);
 console.log("downloaded:", download.suggestedFilename());
+
+// Version history on the real engine: enable, name a milestone, edit, compare, restore.
+const git = (...args) => execFileSync("git", ["-C", projectDir, ...args], { encoding: "utf8" }).trim();
+const editorText = () => page.locator(".cm-content").innerText();
+await page.getByRole("tab", { name: "History", exact: true }).click();
+const timeline = page.getByRole("group", { name: "Version history" });
+const enable = page.getByRole("button", { name: "Enable version history" });
+await Promise.race([enable.waitFor({ timeout: 10000 }), timeline.waitFor({ timeout: 10000 })]);
+if (await enable.isVisible()) await enable.click();
+await timeline.waitFor({ timeout: 10000 });
+await page.getByRole("button", { name: "Save version", exact: true }).click();
+const saveDialog = page.getByRole("dialog", { name: "Save version" });
+await saveDialog.getByPlaceholder("e.g. Sent to reviewer").fill("Sent to reviewer");
+await saveDialog.getByRole("button", { name: "Save version" }).click();
+const milestone = timeline.getByRole("listitem", { name: /^Version / }).filter({ hasText: "Sent to reviewer" });
+await milestone.waitFor({ timeout: 10000 });
+console.log("milestone tag:", git("tag", "--list"), "· git status clean:", git("status", "--porcelain") === "");
+
+const ADDED = "A sentence added after the milestone.";
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type(`\n\n${ADDED}`);
+await page.waitForTimeout(1500);
+await milestone.hover();
+await milestone.getByRole("button", { name: /^Actions for/ }).click();
+await page.getByRole("menuitem", { name: "Compare with current" }).click();
+const compareView = page.getByRole("region", { name: "Compare versions" });
+await compareView.locator("ins").first().waitFor({ timeout: 10000 });
+await shot("04-history-compare");
+console.log("compare ins:", JSON.stringify(await compareView.locator("ins").allTextContents()));
+await compareView.getByRole("button", { name: "Close" }).click();
+
+await milestone.hover();
+await milestone.getByRole("button", { name: /^Actions for/ }).click();
+await page.getByRole("menuitem", { name: /^Restore this version/ }).click();
+await page.getByRole("alertdialog", { name: "Restore version" }).getByRole("button", { name: "Restore" }).click();
+const restoreStarted = Date.now();
+while ((await editorText()).includes(ADDED) && Date.now() - restoreStarted < 10000) await page.waitForTimeout(100);
+await page.waitForTimeout(500);
+await shot("05-history-restored");
+console.log("restored, sentence gone from the editor:", !(await editorText()).includes(ADDED));
+console.log("history:", JSON.stringify(git("log", "--all", "--format=%s").split("\n")));
 
 await page.getByRole("button", { name: "Close project" }).click();
 await page.getByText("Open paper…").click();

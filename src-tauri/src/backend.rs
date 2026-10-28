@@ -1,5 +1,6 @@
 //! State and behavior shared by the desktop app (Tauri IPC) and the browser dev server (HTTP).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -12,6 +13,7 @@ use tokio::task::AbortHandle;
 
 use crate::bibfetch;
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
+use crate::history;
 use crate::project::{self, PaperMeta};
 use crate::review;
 use crate::showlatex;
@@ -31,6 +33,58 @@ pub struct Backend {
     build_lock: Arc<tokio::sync::Mutex<()>>,
     /// The last SyncTeX file read, kept until the next compile rewrites it.
     synctex: Mutex<Option<(PathBuf, SystemTime, Arc<SyncTex>)>>,
+    /// One lock per project folder, held by writes and history commands, so a snapshot never sees
+    /// a half-written multi-file change.
+    projects: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Commands that write the project or read it as a whole; they run under the project lock.
+const LOCKED: [&str; 26] = [
+    "project_create",
+    "project_open",
+    "project_save",
+    "part_save",
+    "part_create",
+    "part_delete",
+    "parts_reorder",
+    "part_split",
+    "parts_merge",
+    "figure_import",
+    "figure_import_bytes",
+    "preamble_save",
+    "template_eject",
+    "template_restore",
+    "dictionary_add",
+    "zotero_link",
+    "history_status",
+    "history_enable",
+    "history_autosave",
+    "history_save_version",
+    "history_list",
+    "history_label",
+    "history_diff",
+    "history_read_part",
+    "history_restore",
+    "history_restore_part",
+];
+
+/// Runs blocking work (git, file trees) off the async runtime.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| e.to_string())?
+}
+
+/// Records an autosave before a command that rewrites or removes parts. A project without history
+/// is not affected; a failing snapshot stops the command, so nothing is lost unrecorded.
+fn autosave_before(dir: &Path, action: &str, files: &[String]) -> Result<(), String> {
+    let titles: Vec<String> = files
+        .iter()
+        .map(|f| {
+            let content = project::read_optional(&dir.join(f)).unwrap_or_default();
+            format!("“{}”", history::part_title(&content, f))
+        })
+        .collect();
+    let reason = format!("Before {action} {}", titles.join(" and "));
+    history::autosave(dir, Some(&reason)).map(|_| ()).map_err(|e| format!("Could not save a snapshot first: {e}"))
 }
 
 #[derive(serde::Serialize)]
@@ -90,7 +144,23 @@ impl Backend {
             running: Mutex::new(None),
             build_lock: Arc::new(tokio::sync::Mutex::new(())),
             synctex: Mutex::new(None),
+            projects: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn project_lock(&self, dir: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.projects.lock().unwrap().entry(dir.to_string()).or_default().clone()
+    }
+
+    /// Repository maintenance after the project is open, under its lock; saves wait for it.
+    fn maintain_later(&self, dir: String) {
+        let lock = self.project_lock(&dir);
+        tokio::spawn(async move {
+            let _guard = lock.lock().await;
+            if let Err(e) = blocking(move || history::maintain(Path::new(&dir))).await {
+                eprintln!("version history maintenance failed: {e}");
+            }
+        });
     }
 
     pub async fn ensure_cache(&self) -> Result<(), String> {
@@ -326,6 +396,59 @@ impl Backend {
             line: usize,
             content: Option<String>,
         }
+        #[derive(Deserialize)]
+        struct Autosave {
+            dir: String,
+            reason: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct SaveVersion {
+            dir: String,
+            label: Option<String>,
+            note: Option<String>,
+            reason: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct HistoryList {
+            dir: String,
+            #[serde(default)]
+            include_autosaves: bool,
+            before: Option<String>,
+            limit: usize,
+        }
+        #[derive(Deserialize)]
+        struct Label {
+            dir: String,
+            id: String,
+            label: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct HistoryDiff {
+            dir: String,
+            from: String,
+            to: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Version {
+            dir: String,
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct VersionFile {
+            dir: String,
+            id: String,
+            file: String,
+        }
+
+        let lock = match args.get("dir").and_then(Value::as_str) {
+            Some(dir) if LOCKED.contains(&command) => Some(self.project_lock(dir)),
+            _ => None,
+        };
+        let _guard = match &lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -333,9 +456,18 @@ impl Backend {
             "project_create" => {
                 let a: Create = parse(args)?;
                 let sample = a.sample.then_some(self.sample_dir.as_path());
-                json(project::create(Path::new(&a.dir), sample, &a.template, &a.title, &a.language)?)
+                let snapshot = project::create(Path::new(&a.dir), sample, &a.template, &a.title, &a.language)?;
+                // A project whose history could not start still opens; the panel offers to enable it.
+                let dir = a.dir.clone();
+                let _ = blocking(move || history::enable(Path::new(&dir), "Project created")).await;
+                json(snapshot)
             }
-            "project_open" => json(project::open(Path::new(&parse::<Dir>(args)?.dir))?),
+            "project_open" => {
+                let dir = parse::<Dir>(args)?.dir;
+                let snapshot = project::open(Path::new(&dir))?;
+                self.maintain_later(dir);
+                json(snapshot)
+            }
             "project_save" => {
                 let a: Save = parse(args)?;
                 json(project::save(Path::new(&a.dir), a.meta.as_ref(), a.bib.as_deref())?)
@@ -350,7 +482,9 @@ impl Backend {
             }
             "part_delete" => {
                 let a: PartFile = parse(args)?;
-                json(project::delete_part(Path::new(&a.dir), &a.file)?)
+                let dir = Path::new(&a.dir);
+                autosave_before(dir, "deleting", std::slice::from_ref(&a.file))?;
+                json(project::delete_part(dir, &a.file)?)
             }
             "parts_reorder" => {
                 let a: Reorder = parse(args)?;
@@ -358,11 +492,15 @@ impl Backend {
             }
             "part_split" => {
                 let a: Split = parse(args)?;
-                json(project::split_part(Path::new(&a.dir), &a.file, a.level)?)
+                let dir = Path::new(&a.dir);
+                autosave_before(dir, "splitting", std::slice::from_ref(&a.file))?;
+                json(project::split_part(dir, &a.file, a.level)?)
             }
             "parts_merge" => {
                 let a: Merge = parse(args)?;
-                json(project::merge_parts(Path::new(&a.dir), &a.files)?)
+                let dir = Path::new(&a.dir);
+                autosave_before(dir, "merging", &a.files)?;
+                json(project::merge_parts(dir, &a.files)?)
             }
             "figure_import" => {
                 let a: FigureImport = parse(args)?;
@@ -439,13 +577,63 @@ impl Backend {
                 let a: BlockLatexArgs = parse(args)?;
                 json(showlatex::block_latex(Path::new(&a.dir), &a.part, a.line, a.content).await?)
             }
+            "history_status" => {
+                let dir = parse::<Dir>(args)?.dir;
+                json(blocking(move || history::status(Path::new(&dir))).await?)
+            }
+            "history_enable" => {
+                let dir = parse::<Dir>(args)?.dir;
+                json(blocking(move || history::enable(Path::new(&dir), "Version history enabled")).await?)
+            }
+            "history_autosave" => {
+                let a: Autosave = parse(args)?;
+                json(blocking(move || history::autosave(Path::new(&a.dir), a.reason.as_deref())).await?)
+            }
+            "history_save_version" => {
+                let a: SaveVersion = parse(args)?;
+                json(
+                    blocking(move || {
+                        history::save_version(Path::new(&a.dir), a.label.as_deref(), a.note.as_deref(), a.reason.as_deref())
+                    })
+                    .await?,
+                )
+            }
+            "history_list" => {
+                let a: HistoryList = parse(args)?;
+                json(
+                    blocking(move || history::list(Path::new(&a.dir), a.include_autosaves, a.before.as_deref(), a.limit))
+                        .await?,
+                )
+            }
+            "history_label" => {
+                let a: Label = parse(args)?;
+                json(blocking(move || history::label(Path::new(&a.dir), &a.id, a.label.as_deref())).await?)
+            }
+            "history_diff" => {
+                let a: HistoryDiff = parse(args)?;
+                json(blocking(move || history::diff(Path::new(&a.dir), &a.from, a.to.as_deref())).await?)
+            }
+            "history_read_part" => {
+                let a: VersionFile = parse(args)?;
+                json(blocking(move || history::read_part(Path::new(&a.dir), &a.id, &a.file)).await?)
+            }
+            "history_restore" => {
+                let a: Version = parse(args)?;
+                json(blocking(move || history::restore(Path::new(&a.dir), &a.id)).await?)
+            }
+            "history_restore_part" => {
+                let a: VersionFile = parse(args)?;
+                json(blocking(move || history::restore_part(Path::new(&a.dir), &a.id, &a.file)).await?)
+            }
+            // The browser has no app to quit; closing the tab is enough.
+            "app_quit" => json(()),
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 32] = [
+pub const COMMANDS: [&str; 43] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -478,6 +666,17 @@ pub const COMMANDS: [&str; 32] = [
     "zotero_read",
     "zotero_watch",
     "block_latex",
+    "history_status",
+    "history_enable",
+    "history_autosave",
+    "history_save_version",
+    "history_list",
+    "history_label",
+    "history_diff",
+    "history_read_part",
+    "history_restore",
+    "history_restore_part",
+    "app_quit",
 ];
 
 #[cfg(test)]
@@ -535,5 +734,63 @@ mod tests {
             panic!("expected JSON")
         };
         assert_eq!(opened["parts"][0]["content"], "# Hola");
+    }
+
+    #[tokio::test]
+    async fn dispatch_round_trips_history() {
+        let backend = backend();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        let call = |command: &'static str, args: Value| {
+            let backend = &backend;
+            async move {
+                match backend.dispatch(command, args).await {
+                    Ok(Reply::Json(value)) => value,
+                    Ok(Reply::Bytes(_)) => panic!("{command}: expected JSON"),
+                    Err(e) => panic!("{command}: {e}"),
+                }
+            }
+        };
+        let created = call(
+            "project_create",
+            serde_json::json!({"dir": dir, "template": "article", "title": "T", "language": "en", "sample": false}),
+        )
+        .await;
+        let file = created["parts"][0]["file"].as_str().unwrap().to_string();
+        let status = call("history_status", serde_json::json!({"dir": dir})).await;
+        assert_eq!((status["enabled"].clone(), status["mode"].clone()), (Value::Bool(true), "own".into()));
+        assert_eq!(status["lastVersion"]["summary"], "Project created");
+
+        call("part_save", serde_json::json!({"dir": dir, "file": file, "content": "# Hola\n\nUno.\n"})).await;
+        let autosave = call("history_autosave", serde_json::json!({"dir": dir, "reason": null})).await;
+        assert_eq!(autosave["kind"], "autosave");
+        assert_eq!(autosave["summary"], "Edited: Hola");
+        let version = call(
+            "history_save_version",
+            serde_json::json!({"dir": dir, "label": "Draft", "note": null, "reason": null}),
+        )
+        .await;
+        assert_eq!((version["kind"].clone(), version["label"].clone()), ("version".into(), "Draft".into()));
+
+        call("part_save", serde_json::json!({"dir": dir, "file": file, "content": "# Hola\n\nDos.\n"})).await;
+        let list = call(
+            "history_list",
+            serde_json::json!({"dir": dir, "includeAutosaves": true, "before": null, "limit": 10}),
+        )
+        .await;
+        let summaries: Vec<&str> = list.as_array().unwrap().iter().map(|v| v["summary"].as_str().unwrap()).collect();
+        assert_eq!(summaries, ["Edited: Hola", "Edited: Hola", "Project created"]);
+        assert_eq!(list[0]["id"], version["id"]);
+
+        let restored = call("history_restore", serde_json::json!({"dir": dir, "id": version["id"]})).await;
+        assert_eq!(restored["parts"][0]["content"], "# Hola\n\nUno.\n");
+        let list = call(
+            "history_list",
+            serde_json::json!({"dir": dir, "includeAutosaves": true, "before": null, "limit": 2}),
+        )
+        .await;
+        assert_eq!(list[0]["kind"], "autosave");
+        assert!(list[0]["summary"].as_str().unwrap().starts_with("Before restoring the version of "));
+        assert_eq!(list[1]["id"], version["id"]);
     }
 }
