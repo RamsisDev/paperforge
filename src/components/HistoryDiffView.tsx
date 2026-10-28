@@ -114,7 +114,8 @@ function RestorePart({ part, target, when, onRestored }: { part: PartDiff; targe
 function PartCard({ part, compare, when, onRestored }: { part: PartDiff; compare: { from: string; to: string | null }; when: string; onRestored: () => void }) {
   // The snapshot of interest: the old one against the current text, else the newer one.
   const target = compare.to === null ? { id: compare.from, file: part.oldFile ?? part.file } : { id: compare.to, file: part.file };
-  const restorable = compare.to === null ? part.status !== "added" : part.status !== "deleted";
+  // A part renamed since would come back under its old name, next to the renamed one.
+  const restorable = compare.to === null ? part.status !== "added" && part.status !== "renamed" : part.status !== "deleted";
   return (
     <section aria-label={part.title} className="overflow-hidden rounded-lg border border-line bg-panel">
       <header className="flex min-h-10 items-center gap-2 border-b border-line bg-raised/40 px-3 py-1.5">
