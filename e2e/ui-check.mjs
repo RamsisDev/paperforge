@@ -788,6 +788,47 @@ console.log("inserted table:\n" + inserted.slice(inserted.lastIndexOf("| Column 
 await page.keyboard.press("Escape");
 await page.keyboard.press("ControlOrMeta+z");
 await settle(200);
+await page.locator(".pf-lp-math").first().hover();
+await settle(600);
+console.log("writing mode: KaTeX hover tooltips on rendered math:", await page.locator(".pf-math-tooltip").count());
+
+// Equation editor: a click on the display equation opens MathLive; Cancel and Escape leave the
+// text alone, and an edit of the raw LaTeX writes back only the formula between the `$$`.
+const editorDoc = () =>
+  page.evaluate(async () => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    return EditorView.findFromDOM(document.querySelector(".cm-editor")).state.doc.toString();
+  });
+const mathDialog = page.getByRole("dialog", { name: "Edit equation" });
+const openEquation = async () => {
+  await page.locator(".pf-lp-math-display").first().click();
+  await mathDialog.locator("math-field").waitFor({ timeout: 10000 });
+};
+const docBefore = await editorDoc();
+await openEquation();
+await settle(300);
+await shot("23d-equation-editor");
+console.log(
+  "equation editor: math-field",
+  JSON.stringify(await mathDialog.locator("math-field").evaluate((mf) => mf.value)),
+  "· raw",
+  JSON.stringify(await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).inputValue()),
+);
+await mathDialog.getByRole("button", { name: "Cancel" }).click();
+console.log("equation editor: cancel leaves the document unchanged:", (await editorDoc()) === docBefore);
+await openEquation();
+await page.keyboard.press("Escape");
+console.log("equation editor: escape leaves the document unchanged:", (await editorDoc()) === docBefore, "· open:", await mathDialog.count());
+await openEquation();
+await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).fill("H(X) = -\\sum_{x} p(x) \\log_2 p(x)");
+await settle(300);
+await shot("23e-equation-edited");
+await mathDialog.getByRole("button", { name: "Apply" }).click();
+await settle(200);
+const docAfter = await editorDoc();
+const changedLines = docAfter.split("\n").filter((line, i) => line !== docBefore.split("\n")[i]);
+console.log("equation editor: after apply, changed lines:", JSON.stringify(changedLines));
 await modeButton("Source").click();
 await settle(200);
 console.log(
@@ -796,6 +837,21 @@ console.log(
   "· math source shown:",
   (await page.locator(".cm-content").textContent()).includes("$$H(X)"),
 );
+await page.locator(".cm-line", { hasText: "Inline math works" }).getByText("ge 0").click();
+await page.keyboard.press("ControlOrMeta+Alt+m");
+await mathDialog.locator("math-field").waitFor({ timeout: 5000 });
+console.log("source mode: Mod-Alt-m opens the equation editor on", JSON.stringify(await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).inputValue()));
+await shot("23f-equation-editor-source-mode");
+await page.keyboard.press("Escape");
+console.log("source mode: escape leaves the document unchanged:", (await editorDoc()) === docAfter);
+
+await page.locator(".cm-line", { hasText: "Inline math works" }).getByText("ge 0").click();
+await page.keyboard.press("ControlOrMeta+Alt+m");
+await mathDialog.locator("math-field").waitFor({ timeout: 5000 });
+console.log("source mode: Mod-Alt-m opens the equation editor on", JSON.stringify(await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).inputValue()));
+await shot("23f-equation-editor-source-mode");
+await page.keyboard.press("Escape");
+console.log("source mode: escape leaves the document unchanged:", (await editorDoc()) === docAfter);
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer, with the cursor in view, in Source and Writing mode.

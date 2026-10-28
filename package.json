@@ -33,6 +33,7 @@
     "dictionary-es": "^4.0.0",
     "katex": "^0.19.1",
     "lucide-react": "^1.63.0",
+    "mathlive": "^0.111.1",
     "nspell": "^2.1.5",
     "pdfjs-dist": "^6.4.299",
     "react": "^19.1.0",

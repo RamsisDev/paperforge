@@ -46,7 +46,8 @@ import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs"
 import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
 import { markdownFolding } from "./folding";
-import { editorModeExtension } from "./livepreview";
+import { editorModeExtension, previewDecorations } from "./livepreview";
+import { mathEditorKeymap } from "./livepreview/math";
 import { tableSlashCommand } from "./livepreview/table/insert";
 import { styleSlashCommands } from "./styles";
 
@@ -100,6 +101,7 @@ function mathAt(state: EditorState, pos: number): { from: number; to: number; te
 
 const mathTooltip = hoverTooltip(
   (view, pos) => {
+    if (previewDecorations(view.state)) return null;
     const math = mathAt(view.state, pos);
     if (!math) return null;
     return {
@@ -358,6 +360,7 @@ function base(): Extension[] {
 export function markdownExtensions(onChange: Extension): Extension[] {
   return [
     formattingKeymap,
+    mathEditorKeymap,
     ...base(),
     markdown({ base: markdownLanguage, codeLanguages: languages }),
     syntaxHighlighting(highlight),
