@@ -75,12 +75,4 @@ export function labels(source: string): Labels {
   return out;
 }
 
-export function wordCount(source: string): number {
-  const prose = source
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/\$\$[\s\S]*?\$\$/g, " ")
-    .replace(/\{[#.][^}]*\}/g, " ")
-    .replace(/[#*_>`|-]/g, " ");
-  const matches = prose.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu);
-  return matches ? matches.length : 0;
-}
+export { wordCount } from "./wordcount";
