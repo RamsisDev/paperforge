@@ -496,6 +496,22 @@ fn fold_accent(c: char) -> char {
 /// Copies an image into `figures/` under a unique, LaTeX-safe name and returns its
 /// project-relative path.
 pub fn import_figure(dir: &Path, source: &Path) -> Result<String, String> {
+    let name = unused_figure_name(dir, source)?;
+    fs::copy(source, dir.join(&name)).map_err(|e| format!("{}: {e}", source.display()))?;
+    Ok(name)
+}
+
+/// Like `import_figure`, for bytes without a file on disk (a pasted image). `data` is base64.
+pub fn import_figure_bytes(dir: &Path, name: &str, data: &str) -> Result<String, String> {
+    let source = Path::new(name);
+    let name = unused_figure_name(dir, source)?;
+    let bytes = decode_base64(data).ok_or("The pasted figure is not valid base64")?;
+    write_atomic(&dir.join(&name), &bytes)?;
+    Ok(name)
+}
+
+/// A free `figures/<stem>.<ext>` for `source`, with `figures/` created.
+fn unused_figure_name(dir: &Path, source: &Path) -> Result<String, String> {
     if !is_figure(source) {
         return Err(format!(
             "Unsupported figure type {}: use {}",
@@ -513,8 +529,30 @@ pub fn import_figure(dir: &Path, source: &Path) -> Result<String, String> {
         name = format!("{stem}-{n}.{ext}");
         n += 1;
     }
-    fs::copy(source, figures.join(&name)).map_err(|e| format!("{}: {e}", source.display()))?;
     Ok(format!("{FIGURES_DIR}/{name}"))
+}
+
+/// Standard base64 with optional padding; whitespace is ignored.
+fn decode_base64(data: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in data.bytes().filter(|c| !c.is_ascii_whitespace()).take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Spaces, `#`, `%` and non-ASCII characters break `\includegraphics`, so keep `[a-z0-9-_]`.
@@ -781,6 +819,41 @@ mod tests {
         let src = tmp.path().join("diagram.svg");
         fs::write(&src, b"<svg/>").unwrap();
         assert!(import_figure(tmp.path(), &src).is_err());
+    }
+
+    #[test]
+    fn import_figure_bytes_sanitizes_deduplicates_and_decodes() {
+        let tmp = blank();
+        let first = import_figure_bytes(tmp.path(), "Screen Shot #2.PNG", "iVBORw0KGgo=").unwrap();
+        assert_eq!(first, "figures/screen-shot--2.png");
+        assert_eq!(fs::read(tmp.path().join(&first)).unwrap(), b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            import_figure_bytes(tmp.path(), "Screen Shot #2.PNG", "aGk").unwrap(),
+            "figures/screen-shot--2-2.png"
+        );
+        assert_eq!(fs::read(tmp.path().join("figures/screen-shot--2-2.png")).unwrap(), b"hi");
+        assert_eq!(import_figure_bytes(tmp.path(), "../../évil.pdf", "").unwrap(), "figures/vil.pdf");
+        assert_eq!(list_figures(tmp.path()).len(), 3);
+    }
+
+    #[test]
+    fn import_figure_bytes_rejects_bad_types_and_data() {
+        let tmp = blank();
+        for name in ["diagram.svg", "anim.gif", "no-extension"] {
+            assert!(import_figure_bytes(tmp.path(), name, "aGk=").unwrap_err().contains("Unsupported"));
+        }
+        assert!(import_figure_bytes(tmp.path(), "x.png", "not base64!").is_err());
+        assert!(list_figures(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn base64_decodes_every_padding_length() {
+        assert_eq!(decode_base64("").unwrap(), b"");
+        assert_eq!(decode_base64("Zg==").unwrap(), b"f");
+        assert_eq!(decode_base64("Zm8=").unwrap(), b"fo");
+        assert_eq!(decode_base64("Zm9v").unwrap(), b"foo");
+        assert_eq!(decode_base64("Zm9v\nYmFy").unwrap(), b"foobar");
+        assert_eq!(decode_base64("+/+/").unwrap(), [0xfb, 0xff, 0xbf]);
     }
 
     #[test]

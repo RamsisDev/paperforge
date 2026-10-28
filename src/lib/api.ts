@@ -113,6 +113,9 @@ export const api = {
   exportZip: (dir: string, dest: string) => invoke<void>("export_zip", { dir, dest }),
   /** Browser only: folders for the in-page folder picker. */
   browse: (path: string | null) => invoke<FolderListing>("_browse", { path }),
+  /** A pasted figure: `data` is base64. Returns the project-relative path. */
+  importFigureBytes: (dir: string, name: string, data: string) =>
+    invoke<string>("figure_import_bytes", { dir, name, data }),
 };
 
 export interface FolderListing {
