@@ -349,7 +349,7 @@ export function Tabs<T extends string>({
           )}
         >
           {t.icon && <span className="shrink-0">{t.icon}</span>}
-          <span className={cx("truncate", compact && value !== t.id && "@max-[19.25rem]:hidden")}>{t.label}</span>
+          <span className={cx("truncate", compact && value !== t.id && "@max-[23rem]:hidden")}>{t.label}</span>
           {t.badge}
         </button>
       ))}

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { escapeRegExp, type FindOptions } from "@/editor/findAcrossParts";
 import type { Diagnostic, PaperMeta, Part, TocEntry } from "@/lib/api";
 
 export const BIB_FILE = "refs.bib";
@@ -6,7 +7,7 @@ export const TEX_FILE = "paper.tex";
 
 /** A Markdown part path, `BIB_FILE` or `TEX_FILE`. */
 export type EditorFile = string;
-export type SidebarTab = "paper" | "structure" | "refs" | "figures";
+export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find";
 export type Theme = "light" | "dark";
 export type GalleryMode = "create" | "change";
 
@@ -26,7 +27,15 @@ export interface Jump {
   file: EditorFile;
   /** 0-based line. */
   line: number;
+  /** Text to select instead of placing the cursor at the line start. */
+  select?: { from: number; to: number };
   nonce: number;
+}
+
+export interface FindState extends FindOptions {
+  replace: string;
+  /** Bumped to focus the query field. */
+  focus: number;
 }
 
 interface State {
@@ -61,6 +70,7 @@ interface State {
   previewReveal: { text: string; nonce: number } | null;
   pageReveal: { page: number; nonce: number } | null;
   contentsReveal: number;
+  find: FindState;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
@@ -96,6 +106,7 @@ export const useStore = create<State>(() => ({
   previewFocus: localStorage.getItem("paperforge.previewFocus") === "1",
   gallery: null,
   contentsReveal: 0,
+  find: { query: "", replace: "", regex: false, matchCase: false, wholeWord: false, skipMarkup: false, focus: 0 },
 }));
 
 export const store = {
@@ -107,6 +118,28 @@ let nonce = 0;
 
 export function jumpTo(file: EditorFile, line: number) {
   store.set({ activeFile: file, jump: { file, line, nonce: ++nonce } });
+}
+
+/** Opens `file` with `from`..`to` selected; `line` is the 0-based line of `from`. */
+export function selectInFile(file: EditorFile, line: number, from: number, to: number) {
+  store.set({ activeFile: file, jump: { file, line, select: { from, to }, nonce: ++nonce } });
+}
+
+/** Opens the Find tab, searching for `query` when given. */
+export function openFind(query?: string) {
+  store.set((s) => ({
+    sidebarOpen: true,
+    sidebarTab: "find",
+    find: {
+      ...s.find,
+      query: query === undefined ? s.find.query : s.find.regex ? escapeRegExp(query) : query,
+      focus: s.find.focus + 1,
+    },
+  }));
+}
+
+export function updateFind(patch: Partial<Omit<FindState, "focus">>) {
+  store.set((s) => ({ find: { ...s.find, ...patch } }));
 }
 
 export function openFile(file: EditorFile) {

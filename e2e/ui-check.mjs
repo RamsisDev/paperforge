@@ -402,6 +402,50 @@ await shot("21b-article-chapter-card");
 await pickTemplate("Article", "Thesis \\/ Report");
 console.log("report again: badges", JSON.stringify(await badges()), "· card", await cardOutline());
 
+// Find/replace across parts: replace all, then Mod-Z undoes it in one part only, both in a part
+// that was in the view and in one that was not open during the replace.
+const findGroups = () =>
+  page.getByLabel("Find results").locator("section").evaluateAll((sections) =>
+    Object.fromEntries(sections.map((s) => [s.getAttribute("aria-label"), Number(s.querySelector("span + span").textContent)])),
+  );
+async function undoIn(title) {
+  await page.getByRole("button", { name: /^All chapters/ }).click();
+  await page.getByRole("menuitem", { name: new RegExp(`^\\d+\\. ${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).click();
+  await settle(300);
+  await page.click(".cm-content");
+  await page.keyboard.press("ControlOrMeta+z");
+  await settle(500);
+  return findGroups();
+}
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+Shift+f");
+await page.getByLabel("Find in all parts").fill("the");
+await page.getByRole("button", { name: "Match case" }).click();
+await page.getByRole("button", { name: "Whole word" }).click();
+await page.getByText("Skip math, code and citations").click();
+await page.getByLabel("Replace with").fill("THE");
+await settle(400);
+await shot("21c-find-results");
+const findBefore = await findGroups();
+const [inView, notOpen] = Object.keys(findBefore);
+await page.getByRole("region", { name: inView, exact: true }).locator("button").nth(1).click();
+await settle(300);
+await page.getByRole("button", { name: "Replace all" }).click();
+await settle(500);
+const findAfter = await findGroups();
+const afterUndoNotOpen = await undoIn(notOpen);
+const afterUndoInView = await undoIn(inView);
+const findOk =
+  Object.keys(findAfter).length === 0 &&
+  JSON.stringify(afterUndoNotOpen) === JSON.stringify({ [notOpen]: findBefore[notOpen] }) &&
+  afterUndoInView[inView] === findBefore[inView] &&
+  afterUndoInView[notOpen] === findBefore[notOpen];
+console.log(
+  `find/replace: ${findOk ? "ok" : "FAILED"} · before ${JSON.stringify(findBefore)} · after replace all ${JSON.stringify(findAfter)}`,
+  `· undo in ${notOpen} ${JSON.stringify(afterUndoNotOpen)} · undo in ${inView} ${JSON.stringify(afterUndoInView)}`,
+);
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer.
 await editorTabs().first().click();
