@@ -13,6 +13,7 @@
 //! git2's `Repository` is not `Sync`: every function opens the repository itself. All of them
 //! block; async callers run them in `spawn_blocking`, under the project lock of `Backend`.
 
+mod bib;
 mod diff;
 mod log;
 mod repo;
