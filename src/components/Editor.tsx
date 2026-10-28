@@ -12,6 +12,7 @@ import {
   syncChapterTemplate,
   texExtensions,
 } from "@/editor/extensions";
+import { syncEditorMode } from "@/editor/livepreview";
 import { locate } from "@/lib/diagnostics";
 import { setBib, setPart, setPreamble } from "@/session";
 import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, openFind, store, useStore, type EditorFile } from "@/store";
@@ -134,6 +135,7 @@ export function Editor() {
     }
     view.setState(next);
     syncChapterTemplate(view);
+    syncEditorMode(view);
     current.current = activeFile;
     requestAnimationFrame(() => (view.scrollDOM.scrollTop = scroll.current.get(activeFile) ?? 0));
     applyLint();
@@ -195,6 +197,7 @@ export function Editor() {
     () =>
       useStore.subscribe((s, prev) => {
         if (s.meta?.template !== prev.meta?.template && viewRef.current) syncChapterTemplate(viewRef.current);
+        if (s.editorMode !== prev.editorMode && viewRef.current) syncEditorMode(viewRef.current);
       }),
     [],
   );

@@ -46,6 +46,7 @@ import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs"
 import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
 import { markdownFolding } from "./folding";
+import { editorModeExtension } from "./livepreview";
 
 const highlight = HighlightStyle.define([
   { tag: t.heading1, fontWeight: "700", fontSize: "1.25em", color: "var(--pf-syn-heading)" },
@@ -367,6 +368,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     autocompletion({ override: [slashCompletions, citationCompletions, crossRefCompletions, latexCompletions], icons: false }),
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
     spellCheck,
+    editorModeExtension(),
     onChange,
   ];
 }
