@@ -510,7 +510,7 @@ fn slug(text: &str) -> String {
     if trimmed.is_empty() { "section".into() } else { trimmed.into() }
 }
 
-fn fold_accent(c: char) -> char {
+pub(crate) fn fold_accent(c: char) -> char {
     match c {
         'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
         'é' | 'è' | 'ê' | 'ë' => 'e',
