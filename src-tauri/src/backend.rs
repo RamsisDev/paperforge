@@ -10,9 +10,11 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 use tokio::task::AbortHandle;
 
+use crate::bibfetch;
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
 use crate::project::{self, PaperMeta};
 use crate::synctex::{self, PdfBox, SourceSpot, SyncTex};
+use crate::zotero;
 
 pub struct Backend {
     pub toolchain: Toolchain,
@@ -279,6 +281,18 @@ impl Backend {
             name: String,
             data: String,
         }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BibLookup {
+            query: String,
+            #[serde(default)]
+            existing_keys: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct ZoteroLink {
+            dir: String,
+            path: Option<String>,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -364,13 +378,28 @@ impl Backend {
                 let a: FigureImportBytes = parse(args)?;
                 json(project::import_figure_bytes(Path::new(&a.dir), &a.name, &a.data)?)
             }
+            "bib_lookup" => {
+                let a: BibLookup = parse(args)?;
+                json(bibfetch::lookup(&a.query, &a.existing_keys).await?)
+            }
+            "zotero_linked" => json(zotero::linked(Path::new(&parse::<Dir>(args)?.dir))?),
+            "zotero_link" => {
+                let a: ZoteroLink = parse(args)?;
+                json(zotero::link(Path::new(&a.dir), a.path.as_deref())?)
+            }
+            "zotero_read" => json(zotero::read_linked(Path::new(&parse::<Dir>(args)?.dir))?),
+            // Over HTTP there is no way to push the change event; the browser syncs by hand.
+            "zotero_watch" => {
+                parse::<Dir>(args)?;
+                json(false)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 23] = [
+pub const COMMANDS: [&str; 28] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -394,6 +423,11 @@ pub const COMMANDS: [&str; 23] = [
     "dictionary_read",
     "dictionary_add",
     "figure_import_bytes",
+    "bib_lookup",
+    "zotero_linked",
+    "zotero_link",
+    "zotero_read",
+    "zotero_watch",
 ];
 
 #[cfg(test)]

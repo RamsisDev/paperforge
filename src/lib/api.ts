@@ -142,7 +142,21 @@ export const api = {
   /** A pasted figure: `data` is base64. Returns the project-relative path. */
   importFigureBytes: (dir: string, name: string, data: string) =>
     invoke<string>("figure_import_bytes", { dir, name, data }),
+  /** A DOI or arXiv id as one BibTeX entry, under a key not in `existingKeys`. Needs the network. */
+  bibLookup: (query: string, existingKeys: string[]) => invoke<BibLookup>("bib_lookup", { query, existingKeys }),
+  /** The absolute path of the external .bib linked to the project (e.g. a Zotero export). */
+  zoteroLinked: (dir: string) => invoke<string | null>("zotero_linked", { dir }),
+  /** Links an external .bib, or unlinks with null; returns the new link. */
+  zoteroLink: (dir: string, path: string | null) => invoke<string | null>("zotero_link", { dir, path }),
+  zoteroRead: (dir: string) => invoke<string | null>("zotero_read", { dir }),
+  /** Starts watching the linked .bib (desktop only); false when nothing is watched. */
+  zoteroWatch: (dir: string) => invoke<boolean>("zotero_watch", { dir }),
 };
+
+export interface BibLookup {
+  key: string;
+  bibtex: string;
+}
 
 export interface FolderListing {
   path: string;

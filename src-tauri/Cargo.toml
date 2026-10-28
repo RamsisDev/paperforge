@@ -33,6 +33,8 @@ tokio = { version = "1", features = ["process", "sync", "time", "fs", "io-util",
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tiny_http = { version = "0.12", optional = true }
 flate2 = "1"
+ureq = "3"
+notify = "8"
 
 [dev-dependencies]
 tempfile = "3"

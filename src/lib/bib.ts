@@ -66,6 +66,73 @@ export function parseBib(source: string): BibEntry[] {
   return entries;
 }
 
+/** `text` after the existing bytes of `bib`, a blank line between; `line` is where it starts, 0-based. */
+export function appendToBib(bib: string, text: string): { bib: string; line: number } {
+  const sep = bib.trim() === "" ? "" : bib.endsWith("\n\n") ? "" : bib.endsWith("\n") ? "\n" : "\n\n";
+  const head = bib + sep;
+  return { bib: head + text, line: head.split("\n").length - 1 };
+}
+
+export interface EntryRange {
+  key: string;
+  /** Offsets of the entry in the source, from its `@` to just past its closing delimiter. */
+  from: number;
+  to: number;
+}
+
+/** Where each entry is; an unclosed entry runs to the next one. */
+export function entryRanges(source: string): EntryRange[] {
+  const header = /@([a-zA-Z]+)\s*([{(])\s*([^,\s]+)\s*,/g;
+  const found: { key: string; from: number; open: number; delim: string }[] = [];
+  for (let m = header.exec(source); m; m = header.exec(source)) {
+    if (/^(comment|string|preamble)$/i.test(m[1])) continue;
+    found.push({ key: m[3], from: m.index, open: m.index + m[0].indexOf(m[2]), delim: m[2] });
+  }
+  return found.map((e, n) => {
+    const limit = n + 1 < found.length ? found[n + 1].from : source.length;
+    let depth = 0;
+    for (let i = e.open; i < limit; i++) {
+      const c = source[i];
+      if (c === "{") depth++;
+      else if (c === "}") depth--;
+      if ((e.delim === "{" && depth === 0 && c === "}") || (e.delim === "(" && depth === 0 && c === ")")) {
+        return { key: e.key, from: e.from, to: i + 1 };
+      }
+    }
+    return { key: e.key, from: e.from, to: e.from + source.slice(e.from, limit).trimEnd().length };
+  });
+}
+
+const layoutFree = (entry: string) => entry.replace(/\s+/g, " ").replace(/\s*([,{}()=])\s*/g, "$1").trim();
+
+/**
+ * Brings the entries of `incoming` into `bib`: an entry whose key is new is appended, one whose
+ * text differs replaces that entry in place, and every other byte of `bib` stays as it was.
+ */
+export function mergeBib(bib: string, incoming: string): { bib: string; added: string[]; updated: string[] } {
+  const current = new Map<string, EntryRange>();
+  for (const r of entryRanges(bib)) if (!current.has(r.key)) current.set(r.key, r);
+  const seen = new Set<string>();
+  const replacements: { range: EntryRange; text: string }[] = [];
+  const fresh: { key: string; text: string }[] = [];
+  for (const r of entryRanges(incoming)) {
+    if (seen.has(r.key)) continue;
+    seen.add(r.key);
+    const text = incoming.slice(r.from, r.to);
+    const existing = current.get(r.key);
+    if (!existing) fresh.push({ key: r.key, text });
+    else if (layoutFree(bib.slice(existing.from, existing.to)) !== layoutFree(text)) {
+      replacements.push({ range: existing, text });
+    }
+  }
+  let next = bib;
+  for (const { range, text } of [...replacements].sort((a, b) => b.range.from - a.range.from)) {
+    next = next.slice(0, range.from) + text + next.slice(range.to);
+  }
+  if (fresh.length > 0) next = appendToBib(next, `${fresh.map((f) => f.text).join("\n\n")}\n`).bib;
+  return { bib: next, added: fresh.map((f) => f.key), updated: replacements.map((r) => r.range.key) };
+}
+
 /** "Donald E. Knuth and Leslie Lamport" -> "Knuth & Lamport"; three or more -> "Knuth et al." */
 export function shortAuthors(author: string): string {
   const names = author.split(/\s+and\s+/i).map((n) => {
