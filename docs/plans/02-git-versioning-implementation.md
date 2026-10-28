@@ -170,5 +170,19 @@ Decisions taken during the batch:
   under the old name next to the renamed one).
 - Exporting a review PDF also records a version ("Review PDF exported").
 
-Follow-ups: session version when quitting the desktop app (`CloseRequested`); the rest of the
-"Known limits" in `docs/versioning.md`; phases F3–F7.
+### Follow-up batch (orchestrator, 2026-10-28)
+
+- `history/maintain.rs`: autosave retention (48 h all, 2 weeks hourly, 3 months daily) by
+  rewriting the hidden chain with compare-and-swap; one pack of every object reachable from refs,
+  reflogs, HEAD and the index (`git repack -a -d`); unreachable loose objects pruned after two
+  weeks. Runs at most daily, in the background after `project_open`. Verified with
+  `git fsck --full --strict`.
+- Quitting: `CloseRequested` and a custom macOS Quit item send `quit-requested`; the frontend saves,
+  records the session version and calls `app_quit`; the backend quits by itself after 5 s.
+  Checked in `ui-check` (save → session version → `app_quit`).
+- Scope: GitHub is the only remote; GitLab, Overleaf, PDF comparison and draft variants dropped.
+
+Gate: build, 248 vitest + 162 Rust unit tests with no warnings, `ui-check` with no page errors.
+
+Remaining: F4 (GitHub sync); from F3, adopting repositories fully and external change detection;
+the "Known limits" in `docs/versioning.md`.

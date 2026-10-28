@@ -7,7 +7,7 @@
 // Every backend write (saves and structure commands) goes through one queue, so a structure
 // command never races a save of the meta or of a part it rewrites.
 
-import { setWindowTitle } from "@/lib/platform";
+import { onQuitRequested, setWindowTitle } from "@/lib/platform";
 import { api, baseName, type CompileMode, type PaperMeta, type Part, type ProjectSnapshot } from "@/lib/api";
 import { usesChapters } from "@/lib/templates";
 import {
@@ -85,6 +85,18 @@ export async function closeProject() {
   store.set({ ...initialProjectState });
   setWindowTitle("PaperForge");
 }
+
+/** Saving before quitting may take this long; the app quits anyway after it. */
+const QUIT_SAVE_MS = 4000;
+
+// Closing the window or quitting the desktop app saves and records the session, like Close.
+onQuitRequested(() => {
+  const leave = store.get().dir ? leaveProject() : Promise.resolve();
+  const timeout = new Promise((resolve) => setTimeout(resolve, QUIT_SAVE_MS));
+  void Promise.race([leave, timeout])
+    .catch(() => {})
+    .finally(() => void api.appQuit());
+});
 
 function queueSave() {
   store.set({ saveState: "pending" });

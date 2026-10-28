@@ -13,9 +13,11 @@ pub mod zotero;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::ipc::Response;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 use backend::{Backend, EngineInfo, Reply};
 use bibfetch::Lookup;
@@ -310,6 +312,56 @@ async fn history_restore_part(state: State<'_, Backend>, dir: String, id: String
     delegate(&state, "history_restore_part", json!({"dir": dir, "id": id, "file": file})).await
 }
 
+/// Sent to the frontend before the app quits, so it saves and records the session first.
+const QUIT_EVENT: &str = "quit-requested";
+/// How long the frontend has to answer with `app_quit` before the app quits anyway.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+/// The menu's own Quit item: the predefined one ends the process without asking the frontend.
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "quit";
+
+/// Set once the frontend has been asked to get ready to quit.
+#[derive(Default)]
+struct QuitRequested(AtomicBool);
+
+/// Closing the window and Quit both come here; the frontend answers with `app_quit`.
+fn request_quit(app: &AppHandle) {
+    if app.state::<QuitRequested>().0.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if app.emit(QUIT_EVENT, ()).is_err() {
+        return app.exit(0);
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(QUIT_GRACE).await;
+        app.exit(0);
+    });
+}
+
+#[tauri::command]
+fn app_quit(app: AppHandle) {
+    app.exit(0);
+}
+
+/// The default menu with its Quit item replaced by one that goes through `request_quit`.
+#[cfg(target_os = "macos")]
+fn menu_with_quit(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let is_quit = |item: &MenuItemKind<tauri::Wry>| {
+            matches!(item, MenuItemKind::Predefined(p) if p.text().is_ok_and(|t| t.trim_start_matches('&').starts_with("Quit")))
+        };
+        if let Some(at) = app_menu.items()?.iter().position(is_quit) {
+            let text = format!("Quit {}", app.package_info().name);
+            app_menu.remove_at(at)?;
+            app_menu.insert(&MenuItem::with_id(app, QUIT_MENU_ID, text, true, Some("CmdOrCtrl+Q"))?, at)?;
+        }
+    }
+    Ok(menu)
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -333,12 +385,27 @@ pub fn run() {
         .setup(|app| {
             app.manage(build_backend(app.handle())?);
             app.manage(ZoteroWatch::default());
+            app.manage(QuitRequested::default());
+            #[cfg(target_os = "macos")]
+            app.set_menu(menu_with_quit(app.handle())?)?;
             // Seed the TeX cache while the user is still picking a project.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = handle.state::<Backend>().ensure_cache().await;
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                request_quit(window.app_handle());
+            }
+        })
+        .on_menu_event(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if _event.id() == QUIT_MENU_ID {
+                request_quit(_app);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             engine_info,
@@ -383,6 +450,7 @@ pub fn run() {
             history_read_part,
             history_restore,
             history_restore_part,
+            app_quit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

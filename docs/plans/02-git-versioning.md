@@ -2,10 +2,12 @@
 
 Goal: non-technical users get Word/Google Docs–style version history (versions, restore, compare,
 named milestones such as "sent to reviewer"), while power users keep a real git repository they
-can push to GitHub/GitLab, or publish to Overleaf.
+can push to GitHub.
 
-Status: phases F0–F2 are implemented on `feat/git-versioning` (see
-`02-git-versioning-implementation.md`); how it works today is in `../versioning.md`.
+Status: F0–F2 and the retention/repack part of F3 are implemented on `feat/git-versioning` (see
+`02-git-versioning-implementation.md`); how it works today is in `../versioning.md`. Scope
+decision (2026-10-28): the only remote is GitHub; GitLab, Overleaf (F5), PDF comparison (F6) and
+draft variants (F7) are out of scope.
 
 Markers: **[V]** verified during research (code read, command run, or prototype in
 `/tmp/pf-git-proto`), **[S]** assumption or untested design. Paths refer to commit `756df5f`.
@@ -211,11 +213,11 @@ against a local bare repo (no network, proven **[V]**). Extend `e2e/web-check.mj
 | F0 | git2 dependency, ignore/attributes, trailing newline in `paper.json`, per-project mutex | S |
 | F1 | Minimal local history: enable/init, autosave to the hidden ref, save version, list, restore all, read part, basic panel | M |
 | F2 | Compare (word and metadata diff), restore one part, milestones (tags), versions on export and close | M |
-| F3 | Retention and repack, adopting existing repos (identity, dirty index, parent repo), external change detection | M |
-| F4 | GitHub/GitLab remotes: keychain token, SSH agent, sync (fetch, merge, push), per-part conflict UI, semantic merges | L |
-| F5 | Publish to Overleaf (branch with the exported LaTeX tree, one way) | M |
-| F6 | Compare PDFs (compile old version, page diff), optional redline PDF | L |
-| F7 | Draft variants (branches): create, switch, merge | M |
+| F3 | Retention and repack (done), adopting existing repos (identity, dirty index, parent repo), external change detection | M |
+| F4 | GitHub remote: keychain token, SSH agent, sync (fetch, merge, push), per-part conflict UI, semantic merges | L |
+| F5 | Publish to Overleaf (branch with the exported LaTeX tree, one way) (out of scope) | — |
+| F6 | Compare PDFs (compile old version, page diff), optional redline PDF (out of scope) | — |
+| F7 | Draft variants (branches): create, switch, merge (out of scope) | — |
 
 ## Risks and open questions
 

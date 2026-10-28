@@ -16,6 +16,7 @@
 mod bib;
 mod diff;
 mod log;
+mod maintain;
 mod repo;
 mod restore;
 mod snapshot;
@@ -26,6 +27,8 @@ use git2::{Commit, IndexAddOption, Oid, Repository};
 use serde::Serialize;
 
 use crate::project::{self, ProjectSnapshot};
+
+pub use maintain::Maintenance;
 
 /// How the project folder relates to a git repository.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -162,6 +165,12 @@ pub struct VersionDiff {
     pub files: Vec<FileChange>,
 }
 
+pub(crate) fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 pub(crate) fn git_err(e: git2::Error) -> String {
     e.message().to_string()
 }
@@ -261,6 +270,11 @@ pub fn restore(dir: &Path, id: &str) -> Result<ProjectSnapshot, String> {
 /// Brings one part back to a snapshot, re-inserting it when it was deleted since.
 pub fn restore_part(dir: &Path, id: &str, file: &str) -> Result<ProjectSnapshot, String> {
     restore::restore_part(dir, id, file)
+}
+
+/// Thins old autosaves and packs loose objects, at most once a day; `None` when not due.
+pub fn maintain(dir: &Path) -> Result<Option<Maintenance>, String> {
+    maintain::maintain_if_due(dir, unix_now())
 }
 
 #[cfg(test)]

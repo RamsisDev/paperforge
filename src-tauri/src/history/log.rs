@@ -161,7 +161,7 @@ fn milestones(repo: &Repository) -> HashMap<Oid, Milestone> {
 }
 
 /// Commits without trailers (made outside PaperForge) count as versions.
-fn kind(commit: &Commit) -> VersionKind {
+pub(super) fn kind(commit: &Commit) -> VersionKind {
     snapshot::trailers(commit.message().unwrap_or("")).kind.unwrap_or(VersionKind::Version)
 }
 

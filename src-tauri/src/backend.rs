@@ -152,6 +152,17 @@ impl Backend {
         self.projects.lock().unwrap().entry(dir.to_string()).or_default().clone()
     }
 
+    /// Repository maintenance after the project is open, under its lock; saves wait for it.
+    fn maintain_later(&self, dir: String) {
+        let lock = self.project_lock(&dir);
+        tokio::spawn(async move {
+            let _guard = lock.lock().await;
+            if let Err(e) = blocking(move || history::maintain(Path::new(&dir))).await {
+                eprintln!("version history maintenance failed: {e}");
+            }
+        });
+    }
+
     pub async fn ensure_cache(&self) -> Result<(), String> {
         self.cache_ready
             .get_or_init(|| async {
@@ -451,7 +462,12 @@ impl Backend {
                 let _ = blocking(move || history::enable(Path::new(&dir), "Project created")).await;
                 json(snapshot)
             }
-            "project_open" => json(project::open(Path::new(&parse::<Dir>(args)?.dir))?),
+            "project_open" => {
+                let dir = parse::<Dir>(args)?.dir;
+                let snapshot = project::open(Path::new(&dir))?;
+                self.maintain_later(dir);
+                json(snapshot)
+            }
             "project_save" => {
                 let a: Save = parse(args)?;
                 json(project::save(Path::new(&a.dir), a.meta.as_ref(), a.bib.as_deref())?)
@@ -609,13 +625,15 @@ impl Backend {
                 let a: VersionFile = parse(args)?;
                 json(blocking(move || history::restore_part(Path::new(&a.dir), &a.id, &a.file)).await?)
             }
+            // The browser has no app to quit; closing the tab is enough.
+            "app_quit" => json(()),
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 42] = [
+pub const COMMANDS: [&str; 43] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -658,6 +676,7 @@ pub const COMMANDS: [&str; 42] = [
     "history_read_part",
     "history_restore",
     "history_restore_part",
+    "app_quit",
 ];
 
 #[cfg(test)]

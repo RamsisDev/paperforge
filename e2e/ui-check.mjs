@@ -361,6 +361,9 @@ function stubTauri(fixture) {
           }
           history.versions.unshift(snapshotInfo("version", 0, "Restored “Notes”"));
           return snapshot();
+        case "plugin:event|listen":
+          (window.__pfListeners ??= {})[args.event] = args.handler;
+          return args.handler;
         default:
           return null;
       }
@@ -1416,6 +1419,16 @@ for (const mode of ["Source", "Writing"]) {
 await trackButton.click();
 await modeButton("Source").click();
 await settle(800);
+
+// Closing the window or quitting: pending edits are saved, the session becomes a version, then the app quits.
+await page.click(".cm-content");
+await page.keyboard.type(" Typed right before quitting.");
+await page.evaluate(() => window[`_${window.__pfListeners["quit-requested"]}`]({ event: "quit-requested", id: 0, payload: null }));
+await page.waitForFunction(() => window.__pfCalls.some((c) => c.cmd === "app_quit"), null, { timeout: 6000 });
+const quitCalls = (await page.evaluate(() => window.__pfCalls.map((c) => c.cmd)))
+  .filter((cmd) => ["part_save", "history_save_version", "app_quit"].includes(cmd))
+  .slice(-3);
+console.log("quit:", quitCalls.join(" → "), "· session:", JSON.stringify((await historyCalls("history_save_version")).at(-1).reason));
 
 const calls = await page.evaluate(() => window.__pfCalls);
 console.log("IPC calls:", [...new Set(calls.map((c) => c.cmd))].join(", "));

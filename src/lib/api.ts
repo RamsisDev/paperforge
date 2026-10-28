@@ -251,6 +251,8 @@ export const api = {
   /** Brings one part back, re-inserting it when it was deleted since. */
   historyRestorePart: (dir: string, id: string, file: string) =>
     invoke<ProjectSnapshot>("history_restore_part", { dir, id, file }),
+  /** Desktop: quits the app, once pending edits are saved. */
+  appQuit: () => invoke<void>("app_quit"),
 };
 
 /** "own": enabled by PaperForge; "adopted": the folder already was a git repository. */

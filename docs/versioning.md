@@ -3,7 +3,7 @@
 PaperForge keeps a Word/Google Docs–style history of every paper: it saves in the background
 while you write, keeps versions at milestones, compares any two of them word by word, and
 restores the whole paper or a single part. Underneath it is a plain git repository in the project
-folder, so the history also works with `git`, GitHub or GitLab.
+folder, so the history also works with `git` and GitHub.
 
 Design and later phases: `plans/02-git-versioning.md`. What was built, and by whom:
 `plans/02-git-versioning-implementation.md`.
@@ -22,11 +22,16 @@ Projects created before this feature show an **Enable version history** banner i
 | Before deleting, splitting or merging parts, and before a restore | autosave with the reason ("Before deleting “Method”") | grey dot |
 | **Save version** (toolbar, Cmd/Ctrl+Shift+S), optionally with a name and a note | version, named when you give a name | bold, with a label chip |
 | After exporting a PDF, a review PDF or the LaTeX sources | version "PDF exported" | bold |
-| When you close the project or open another one, if the paper changed | version "Session 28 Oct 10:02–12:30" | bold |
+| When you close the project, open another one, close the window or quit (Cmd+Q), if the paper changed | version "Session 28 Oct 10:02–12:30" | bold |
 | After restoring | version "Restored the version of 28 Oct 10:02" | bold |
 
 Nothing is recorded when nothing changed. Saving a named version without changes names the last
 version instead.
+
+**What is kept.** Versions are kept forever. Autosaves thin out with age: every one from the last
+48 hours, then one per hour for two weeks, then one per day for three months; older autosaves go.
+Once a day, when a project opens, PaperForge does this cleanup in the background and packs the
+repository so it stays small.
 
 **Reading the timeline.** The History tab groups entries by day ("Today", "Yesterday",
 "28 Oct"). Each entry has a summary written from the changes ("Edited: Introduction, Method ·
@@ -93,6 +98,7 @@ src-tauri/src/history/    mod.rs   types, public API, shared helpers
                           log.rs   timeline, paging, names (tags)
                           restore.rs  read_part, restore, restore_part
                           diff.rs, bib.rs  word diff, paper.json and refs.bib in plain language
+                          maintain.rs  autosave retention, repack and prune
 ```
 
 The engine is `git2` 0.21 with a vendored libgit2 (no system git needed). Only the
@@ -161,19 +167,47 @@ commands delegate to `Backend::dispatch`, so locking and hooks exist in one plac
   repositories, plus `dispatch_round_trips_history` in `backend.rs`.
 - `src/lib/history.test.ts`: day grouping, autosave folding, session labels, segment folding.
 - `e2e/ui-check.mjs`: History tab, Save version, compare and restore against an in-memory history
-  stub; also measures typing cost.
+  stub, and the quit round trip (save, session version, `app_quit`); also measures typing cost.
 - `e2e/web-check.mjs`: the same round trip against the real backend (`npm run web -- <project>`),
   checking the tag and a clean `git status` with the git CLI.
 
+### Maintenance (`history/maintain.rs`)
+
+libgit2 has no `git gc`, and every snapshot, `history_status` and compare against the working
+copy writes loose objects. `history::maintain` runs at most once a day
+(`paperforge.lastMaintenance` in `.git/config`), spawned by `Backend` after `project_open` under
+the project lock, and logs failures instead of reporting them:
+
+1. **Thin** each `refs/paperforge/autosave/*` chain: keep all autosaves younger than 48 h, the
+   newest per hour up to 2 weeks, the newest per day up to 3 months. The chain is rewritten from
+   the oldest dropped autosave up, reusing trees, messages and signatures; the ref moves with a
+   compare-and-swap, or is deleted when nothing is left. Versions and tags are never touched.
+2. **Pack** when something was thinned, there is more than one pack, or there are 256+ loose
+   objects: every object reachable from refs, reflogs, HEAD and `.git/index` goes into one new
+   pack (`PackBuilder`, commits inserted through a revwalk so blobs delta against their older
+   versions); then the other packs (except `.keep` ones) and `multi-pack-index` are removed —
+   `git repack -a -d`.
+3. **Prune** loose objects: reachable ones (now packed) go; unreachable ones only when older than
+   two weeks, like `git prune --expire=2.weeks.ago`, so an object a running `git` command just
+   wrote survives.
+
+A repository with linked worktrees is only thinned, not packed. The test suite checks the result
+with `git fsck --full --strict` when git is installed.
+
+### Quitting the desktop app
+
+Closing the window and the menu's Quit (Cmd+Q, a custom item replacing the predefined one, which
+would end the process at once) both call `request_quit` in `lib.rs`: the close is prevented and the
+frontend gets a `quit-requested` event. `session.ts` saves pending edits and records the session
+version (at most 4 s), then calls `app_quit`. If the frontend never answers, the backend quits by
+itself after 5 s.
+
 ## Known limits and next steps
 
-- Quitting the desktop app does not record a session version yet (closing or switching projects
-  does); autosaves still cover the text. Fix: handle `CloseRequested` in the backend.
-- No retention or repack yet: autosaves and `history_status`/compare (which build trees from the
-  working copy) add loose objects. Phase F3 thins autosaves (48 h all, 2 weeks hourly, 3 months
-  daily) and repacks.
+- Quit from the Dock or at logout ends the process without the `quit-requested` round trip (tao
+  offers no hook for it); autosaves still cover the text.
 - An adopted repository keeps files it already tracked, even if now ignored (e.g. a committed
-  `.build/`); F3 offers to untrack them.
+  `.build/`).
 - `PaperForge-Changed` separates paths with ", ", so a path containing a comma would be split.
-- Later phases: remotes and sync with GitHub/GitLab (F4), one-way publish to Overleaf (F5),
-  compare PDFs (F6), draft variants as branches (F7).
+- Next and last phase: sync with GitHub (F4). GitLab, Overleaf, PDF comparison and draft variants
+  are out of scope.
