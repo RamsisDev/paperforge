@@ -13,6 +13,7 @@ use tokio::task::AbortHandle;
 use crate::bibfetch;
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
 use crate::project::{self, PaperMeta};
+use crate::showlatex;
 use crate::synctex::{self, PdfBox, SourceSpot, SyncTex};
 use crate::zotero;
 
@@ -298,6 +299,13 @@ impl Backend {
             dir: String,
             path: Option<String>,
         }
+        #[derive(Deserialize)]
+        struct BlockLatexArgs {
+            dir: String,
+            part: String,
+            line: usize,
+            content: Option<String>,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -347,7 +355,7 @@ impl Backend {
             }
             "read_tex" => {
                 let dir = parse::<Dir>(args)?.dir;
-                json(compiler::flatten_tex(&project::build_dir(Path::new(&dir))).await?)
+                json(compiler::flatten_tex(Path::new(&dir)).await?)
             }
             "compile" => {
                 let a: Compile = parse(args)?;
@@ -407,13 +415,17 @@ impl Backend {
                 parse::<Dir>(args)?;
                 json(false)
             }
+            "block_latex" => {
+                let a: BlockLatexArgs = parse(args)?;
+                json(showlatex::block_latex(Path::new(&a.dir), &a.part, a.line, a.content).await?)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 31] = [
+pub const COMMANDS: [&str; 32] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -445,6 +457,7 @@ pub const COMMANDS: [&str; 31] = [
     "zotero_link",
     "zotero_read",
     "zotero_watch",
+    "block_latex",
 ];
 
 #[cfg(test)]

@@ -273,8 +273,32 @@ async fn exported_zip_compiles_from_its_root() {
     assert!(status.success());
     assert!(out.path().join("paper.pdf").exists());
 
-    let flat = compiler::flatten_tex(&project::build_dir(tmp.path())).await.unwrap();
+    for name in ["paper.tex", "part-sections-method.tex"] {
+        let text = std::fs::read_to_string(out.path().join(name)).unwrap();
+        assert!(!text.contains("%PF"), "{name} keeps block markers");
+    }
+
+    let flat = compiler::flatten_tex(tmp.path()).await.unwrap();
     assert!(!flat.contains("\\include{") && flat.contains("\\chapter{Method}"), "{flat}");
+    assert!(flat.contains(&format!("{}{METHOD}\n%PF:1\n", compiler::PART_START)), "{flat}");
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn block_latex_shows_the_equation_of_a_display_math_block() {
+    let tmp = sample_project("article", "");
+    assert!(compile(tmp.path(), CompileMode::Preview, None).await.ok);
+    let markdown = std::fs::read_to_string(tmp.path().join(METHOD)).unwrap();
+    let line = markdown.lines().position(|l| l.contains("{#eq:entropy}")).unwrap() + 1;
+    let block = paperforge_lib::showlatex::block_latex(tmp.path(), METHOD, line, None).await.unwrap().unwrap();
+    assert!(!block.stale);
+    assert!(block.latex.contains("\\begin{equation}") && block.latex.contains("\\label{eq:entropy}"), "{block:?}");
+    assert!(block.markdown_from <= line && block.markdown_to >= line, "{block:?}");
+    println!("block_latex for {METHOD}:{line}: {:?}", block.latex);
+
+    edit_part(tmp.path(), METHOD, |c| c.replacen("Inline math", "Edited inline math", 1));
+    let block = paperforge_lib::showlatex::block_latex(tmp.path(), METHOD, line, None).await.unwrap().unwrap();
+    assert!(block.stale);
 }
 
 /// The app aborts a running compile when the user keeps typing; the abort must kill TeX and

@@ -38,7 +38,12 @@ const AUX_FILE: &str = "paper.aux";
 const TOC_CACHE: &str = "toc.json";
 const FRAGMENT_PREFIX: &str = "part-";
 /// Tectonic also runs BibTeX on each `\include`d .aux, leaving a harmless `part-*.blg`.
-const FRAGMENT_EXTENSIONS: [&str; 6] = ["tex", "aux", "bbl", "blg", "hash", "pandoc"];
+const FRAGMENT_EXTENSIONS: [&str; 7] = ["tex", "aux", "bbl", "blg", "hash", "pandoc", "source"];
+/// `<fragment>.source` holds [`source_hash`] of the Markdown the fragment was generated from.
+const SOURCE_EXTENSION: &str = "source";
+/// Lines `flatten_tex` puts around each pasted fragment: `%PF-PART:<part file>` … `%PF-PART-END`.
+pub const PART_START: &str = "%PF-PART:";
+pub const PART_END: &str = "%PF-PART-END";
 const FRAGMENT_INTERMEDIATES: [&str; 3] = ["aux", "bbl", "blg"];
 /// Part of every conversion cache key: bump it when the Pandoc command lines or the Markdown
 /// fed to them (block markers) change.
@@ -176,9 +181,18 @@ pub struct Fragment {
 }
 
 impl Fragment {
-    fn tex_file(&self) -> String {
+    pub fn tex_file(&self) -> String {
         format!("{}.tex", self.name)
     }
+
+    pub fn source_file(&self) -> String {
+        format!("{}.{SOURCE_EXTENSION}", self.name)
+    }
+}
+
+/// The hash of a part's Markdown stored next to the fragment generated from it.
+pub fn source_hash(markdown: &[u8]) -> String {
+    cache_key(&[markdown])
 }
 
 /// Fragments stay flat in the build directory, named `part-<path>` with `[a-z0-9-]` only, since
@@ -587,9 +601,14 @@ async fn convert_parts(
         marks[i] = Some(marked);
         let cmd = pandoc_fragment(tc, dir, fragment, options, style_classes);
         let (build, stem, limit) = (build.to_path_buf(), fragment.name.clone(), limit.clone());
+        let (source, source_file) = (source_hash(&content), build.join(fragment.source_file()));
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.expect("the semaphore is never closed");
-            (i, run_cached(&build, &stem, key, cmd, Some(input)).await)
+            let result = run_cached(&build, &stem, key, cmd, Some(input)).await;
+            if matches!(&result, Ok((out, _)) if out.success) && read_or_empty(&source_file).await != source {
+                let _ = tokio::fs::write(&source_file, &source).await;
+            }
+            (i, result)
         });
     }
     let mut outputs: Vec<Option<RunOutput>> = fragments.iter().map(|_| None).collect();
@@ -673,10 +692,14 @@ pub fn without_includeonly(tex: &str) -> String {
         .collect()
 }
 
-/// The main document with every fragment pasted in place of its `\input` / `\include` line.
-pub async fn flatten_tex(build: &Path) -> Result<String, String> {
+/// The project's main document with every fragment pasted in place of its `\input` /
+/// `\include` line, between [`PART_START`] and [`PART_END`] lines and with its `%PF:N` markers,
+/// so the in-app view can map its lines back to the parts.
+pub async fn flatten_tex(dir: &Path) -> Result<String, String> {
+    let build = project::build_dir(dir);
     let path = build.join(TEX_FILE);
     let main = tokio::fs::read_to_string(&path).await.map_err(|e| format!("{}: {e}", path.display()))?;
+    let parts = project::read_meta(dir).map(|m| fragments(&m.parts)).unwrap_or_default();
     let mut out = String::with_capacity(main.len());
     for line in main.lines() {
         match included_fragment(line) {
@@ -685,7 +708,11 @@ pub async fn flatten_tex(build: &Path) -> Result<String, String> {
                 let fragment = tokio::fs::read_to_string(&path)
                     .await
                     .map_err(|e| format!("{}: {e}", path.display()))?;
+                let part = parts.iter().find(|f| f.name == name).map_or(name, |f| f.part.as_str());
+                out.push_str(&format!("{PART_START}{part}\n"));
                 out.push_str(fragment.trim_end());
+                out.push('\n');
+                out.push_str(PART_END);
             }
             None => out.push_str(line),
         }
@@ -1975,6 +2002,9 @@ on two lines.
             async move { convert_parts(tc, dir, build, frags, options, classes, "test").await.unwrap().converted }
         };
         assert_eq!(parts("").await, 1);
+        let content = std::fs::read(dir.join(&frags[0].part)).unwrap();
+        let source = std::fs::read_to_string(build.join(frags[0].source_file())).unwrap();
+        assert_eq!(source, source_hash(&content));
         assert_eq!(parts("").await, 0);
         assert_eq!(parts("div:note").await, 1);
         assert_eq!(parts("div:note").await, 0);
@@ -2038,14 +2068,26 @@ on two lines.
     }
 
     #[tokio::test]
-    async fn flattened_tex_pastes_fragments() {
+    async fn flattened_tex_pastes_fragments_between_part_lines() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(TEX_FILE), "\\begin{document}\n\\include{part-a}\n\\end{document}\n")
-            .unwrap();
-        std::fs::write(tmp.path().join("part-a.tex"), "\\chapter{A}\nText.\n\n").unwrap();
+        project::create(tmp.path(), None, "report", "", "").unwrap();
+        let build = project::build_dir(tmp.path());
+        std::fs::create_dir_all(&build).unwrap();
+        let fragment = &fragments(&project::read_meta(tmp.path()).unwrap().parts)[0];
+        std::fs::write(
+            build.join(TEX_FILE),
+            format!("\\begin{{document}}\n\\include{{{}}}\n\\include{{part-gone}}\n\\end{{document}}\n", fragment.name),
+        )
+        .unwrap();
+        std::fs::write(build.join(fragment.tex_file()), "%PF:1\n\n\\chapter{A}\nText.\n\n").unwrap();
+        std::fs::write(build.join("part-gone.tex"), "Old.\n").unwrap();
         assert_eq!(
             flatten_tex(tmp.path()).await.unwrap(),
-            "\\begin{document}\n\\chapter{A}\nText.\n\\end{document}\n"
+            format!(
+                "\\begin{{document}}\n%PF-PART:{}\n%PF:1\n\n\\chapter{{A}}\nText.\n%PF-PART-END\n\
+                 %PF-PART:part-gone\nOld.\n%PF-PART-END\n\\end{{document}}\n",
+                fragment.part
+            )
         );
     }
 }

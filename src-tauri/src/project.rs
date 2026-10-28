@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::compiler::{self, TEMPLATE_PARTIALS, TEMPLATES, TEX_FILE};
 use crate::layout::Layout;
+use crate::markers;
 use crate::styles::Style;
 
 pub const META_FILE: &str = "paper.json";
@@ -615,7 +616,8 @@ pub fn export_zip(dir: &Path, dest: &Path) -> Result<(), String> {
     add(TEX_FILE, compiler::without_includeonly(&tex).as_bytes())?;
     for name in tex.lines().filter_map(compiler::included_fragment) {
         let fragment = format!("{name}.tex");
-        add(&fragment, &read(&build.join(&fragment))?)?;
+        let text = String::from_utf8_lossy(&read(&build.join(&fragment))?).into_owned();
+        add(&fragment, markers::strip_markers(&text).as_bytes())?;
     }
     let bib = dir.join(BIB_FILE);
     if bib.exists() {
@@ -1211,5 +1213,21 @@ mod tests {
         assert!(read_dictionary(tmp.path()).is_err());
         assert!(add_to_dictionary(tmp.path(), &words(&["word"])).is_err());
         assert_eq!(fs::read_to_string(outside.path().join(DICTIONARY_FILE)).unwrap(), "secret\n");
+    }
+
+    #[test]
+    fn exported_fragments_have_no_block_markers() {
+        use std::io::Read;
+        let tmp = blank();
+        let build = build_dir(tmp.path());
+        fs::create_dir_all(&build).unwrap();
+        fs::write(build.join(TEX_FILE), "\\begin{document}\n\\input{part-a}\n\\end{document}\n").unwrap();
+        fs::write(build.join("part-a.tex"), "%PF:1\n\n\\section{A}\n\n%PF:3\n\nText.\n").unwrap();
+        let dest = tmp.path().join("out.zip");
+        export_zip(tmp.path(), &dest).unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(&dest).unwrap()).unwrap();
+        let mut fragment = String::new();
+        archive.by_name("part-a.tex").unwrap().read_to_string(&mut fragment).unwrap();
+        assert_eq!(fragment, "\\section{A}\n\nText.\n");
     }
 }
