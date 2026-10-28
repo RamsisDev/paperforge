@@ -11,6 +11,7 @@ import {
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { editorBridge } from "@/editor/bridge";
+import { api } from "@/lib/api";
 import { bestLineInParts } from "@/lib/parts";
 import { usesChapters } from "@/lib/templates";
 import { bestLine } from "@/lib/textmatch";
@@ -250,17 +251,35 @@ export function Preview() {
     zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1);
   }
 
-  // Double-click in the PDF: find the clicked sentence in the Markdown source.
-  function onDoubleClick(e: React.MouseEvent) {
-    const span = (e.target as HTMLElement).closest(".textLayer span");
-    if (!span) return;
-    let text = span.textContent ?? "";
-    for (let next = span.nextElementSibling; next && text.split(/\s+/).length < 14; next = next.nextElementSibling) {
+  // Double-click in the PDF: SyncTeX names the Markdown line; without its data, find the clicked
+  // sentence in the source.
+  async function onDoubleClick(e: React.MouseEvent) {
+    const target = e.target as HTMLElement;
+    const page = target.closest<HTMLElement>(".pf-page");
+    const span = target.closest(".textLayer span");
+    let text = span?.textContent ?? "";
+    for (let next = span?.nextElementSibling; next && text.split(/\s+/).length < 14; next = next.nextElementSibling) {
       text += ` ${next.textContent ?? ""}`;
     }
     const clicked = window.getSelection()?.toString();
+    const { dir } = store.get();
+    if (page && dir) {
+      const box = page.getBoundingClientRect();
+      const spot = await api
+        .synctexToSource(dir, Number(page.dataset.page) + 1, (e.clientX - box.left) / scale, (e.clientY - box.top) / scale)
+        .catch(() => null);
+      if (spot && store.get().parts.some((p) => p.file === spot.part)) return jumpTo(spot.part, spot.line - 1);
+    }
+    if (!span) return;
     const match = bestLineInParts(text, store.get().parts, clicked);
     if (match) jumpTo(match.file, match.line);
+  }
+
+  function flash(page: number, top: number, height: number, key: number) {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTo({ top: pageTops()[page] + top * scale - el.clientHeight / 3, behavior: "smooth" });
+    setReveal({ page, top, height, key });
   }
 
   // Contents entry clicked: scroll to its printed page.
@@ -292,20 +311,24 @@ export function Preview() {
         }
         const lines = (await Promise.all(linesCache.current.lines)).flat();
         const match = bestLine(request.text, lines.map((l) => l.text));
-        const el = scroller.current;
-        if (!match || !el) return;
+        if (!match) return;
         const line = lines[match.line];
-        const top = pageTops()[line.page] + line.top * scale;
-        el.scrollTo({ top: top - el.clientHeight / 3, behavior: "smooth" });
-        setReveal({ page: line.page, top: line.top, height: line.height, key: request.nonce });
+        flash(line.page, line.top, line.height, request.nonce);
       }),
     [doc, scale],
   );
 
-  function revealCursor() {
+  // Cursor -> PDF: SyncTeX knows where the line was typeset; without its data, match the text.
+  async function revealCursor() {
     const view = editorBridge.view;
-    if (view && isPartFile(store.get().activeFile)) {
-      revealInPreview(view.state.doc.lineAt(view.state.selection.main.head).text);
+    const { activeFile, dir } = store.get();
+    if (!view || !isPartFile(activeFile)) return;
+    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    const spot = dir ? await api.synctexToPdf(dir, activeFile, line.number).catch(() => null) : null;
+    if (spot && doc && spot.page <= doc.sizes.length) {
+      flash(spot.page - 1, spot.y, spot.height, Date.now());
+    } else {
+      revealInPreview(line.text);
     }
   }
 

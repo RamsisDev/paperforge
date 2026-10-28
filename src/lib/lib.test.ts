@@ -260,6 +260,14 @@ describe("locate", () => {
     expect(none).toMatchObject({ file: null, line: null });
   });
 
+  it("prefers the Markdown line the block markers resolved, unless the part got shorter", () => {
+    const d = { ...base, message: "Overfull \\hbox", source: "Inline math works as usual", part: "sections/method.md" };
+    const [marked, stale, unresolved] = locate([{ ...d, partLine: 7 }, { ...d, partLine: 99 }, { ...d, partLine: null }], PARTS);
+    expect(marked).toMatchObject({ file: "sections/method.md", line: 6 });
+    expect(stale).toMatchObject({ file: "sections/method.md", line: 2 });
+    expect(unresolved).toMatchObject({ file: "sections/method.md", line: 2 });
+  });
+
   it("searches every part when the diagnostic has no part", () => {
     const [d] = locate([{ ...base, file: "paper.tex", message: "x", source: "labeled display equations are numbered", part: null }], PARTS);
     expect(d).toMatchObject({ file: "sections/method.md", line: 2 });

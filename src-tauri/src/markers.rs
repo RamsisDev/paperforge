@@ -266,11 +266,11 @@ pub fn mark_blocks(markdown: &str) -> Marked {
         }
         text.push_str(raw);
 
-        if indent < 4 || in_container {
-            if let Some(open) = code_fence(s) {
-                fence = Some(open);
-                continue;
-            }
+        if (indent < 4 || in_container)
+            && let Some(open) = code_fence(s)
+        {
+            fence = Some(open);
+            continue;
         }
         if let Some(opens) = div_fence(s) {
             if opens {

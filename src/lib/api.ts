@@ -53,6 +53,23 @@ export interface Diagnostic {
   source: string | null;
   /** The Markdown part the generated line came from. */
   part: string | null;
+  /** 1-based line in `part` the generated line came from, by the fragment's block markers. */
+  partLine?: number | null;
+}
+
+/** A Markdown line of a part; `line` is 1-based. */
+export interface SourceSpot {
+  part: string;
+  line: number;
+}
+
+/** A region of a PDF page: 1-based page, PDF points from the top left. */
+export interface PdfBox {
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface TocEntry {
@@ -113,6 +130,12 @@ export const api = {
   exportZip: (dir: string, dest: string) => invoke<void>("export_zip", { dir, dest }),
   /** Browser only: folders for the in-page folder picker. */
   browse: (path: string | null) => invoke<FolderListing>("_browse", { path }),
+  /** The Markdown line typeset at a spot of the last compiled PDF; null without SyncTeX data. */
+  synctexToSource: (dir: string, page: number, x: number, y: number) =>
+    invoke<SourceSpot | null>("synctex_to_source", { dir, page, x, y }),
+  /** Where a Markdown line (1-based) of a part was typeset; null without SyncTeX data. */
+  synctexToPdf: (dir: string, part: string, line: number) =>
+    invoke<PdfBox | null>("synctex_to_pdf", { dir, part, line }),
 };
 
 export interface FolderListing {
