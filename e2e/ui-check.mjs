@@ -162,6 +162,11 @@ function stubTauri(fixture) {
           return (await file(args.path)).arrayBuffer();
         case "read_tex":
           return (await file(`${state.dir}/.build/paper.tex`)).text();
+        // No SyncTeX data unless a check sets an answer: the preview falls back to text matching.
+        case "synctex_to_source":
+          return window.__pfSynctexSource ?? null;
+        case "synctex_to_pdf":
+          return window.__pfSynctexPdf ?? null;
         default:
           return null;
       }
@@ -329,10 +334,26 @@ await shot("15-references");
 await page.getByRole("tab", { name: "Figures", exact: true }).click();
 await settle(500);
 
-// Double-click a word in the PDF: the editor opens the part with that sentence.
+// Double-click a word in the PDF: with SyncTeX data the editor opens the line it names, and the
+// cursor reveal flashes the box it names.
 await page.getByRole("tab", { name: "Structure", exact: true }).click();
 await page.locator(".pf-page").first().scrollIntoViewIfNeeded();
 const span = page.locator(".textLayer span", { hasText: "measured" }).first();
+await span.scrollIntoViewIfNeeded();
+await page.evaluate(() => (window.__pfSynctexSource = { part: "sections/method.md", line: 3 }));
+await span.dblclick();
+await settle(500);
+console.log("SyncTeX double-click opened:", await editorTab(), "/", await page.locator(".cm-activeLine").first().textContent());
+await page.evaluate(() => (window.__pfSynctexPdf = { page: 2, x: 72, y: 300, width: 400, height: 12 }));
+await page.getByRole("button", { name: "Show cursor position in PDF" }).click();
+await settle(700);
+const revealedPage = await page.evaluate(() =>
+  [...document.querySelectorAll(".pf-page")].findIndex((p) => p.parentElement.querySelector(".pf-reveal")),
+);
+console.log("SyncTeX cursor reveal on page:", revealedPage + 1);
+await page.evaluate(() => (window.__pfSynctexSource = window.__pfSynctexPdf = null));
+
+// Without SyncTeX data: the editor opens the part with the clicked sentence.
 await span.scrollIntoViewIfNeeded();
 await span.dblclick();
 await settle(500);

@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::markers::{self, BlockMap, Marked};
 use crate::project::{self, BIB_FILE, BUILD_DIR, PaperMeta};
 
 /// The default relay redirects to a mirror that is unreachable; this host serves the same bundle.
@@ -33,8 +34,9 @@ const FRAGMENT_PREFIX: &str = "part-";
 /// Tectonic also runs BibTeX on each `\include`d .aux, leaving a harmless `part-*.blg`.
 const FRAGMENT_EXTENSIONS: [&str; 6] = ["tex", "aux", "bbl", "blg", "hash", "pandoc"];
 const FRAGMENT_INTERMEDIATES: [&str; 3] = ["aux", "bbl", "blg"];
-/// Part of every conversion cache key: bump it when the Pandoc command lines change.
-const PANDOC_ARGS_VERSION: &str = "2";
+/// Part of every conversion cache key: bump it when the Pandoc command lines or the Markdown
+/// fed to them (block markers) change.
+const PANDOC_ARGS_VERSION: &str = "3";
 
 const PANDOC_TIMEOUT: Duration = Duration::from_secs(30);
 const TEX_OFFLINE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -82,6 +84,8 @@ pub struct Diagnostic {
     pub source: Option<String>,
     /// The Markdown part a fragment (or a Pandoc message) came from.
     pub part: Option<String>,
+    /// 1-based line in `part` that the fragment line came from, by the block markers.
+    pub part_line: Option<usize>,
 }
 
 impl Diagnostic {
@@ -94,6 +98,7 @@ impl Diagnostic {
             line: None,
             source: None,
             part: None,
+            part_line: None,
         }
     }
 
@@ -289,14 +294,22 @@ struct RunOutput {
     text: String,
 }
 
-async fn run(mut cmd: Command, timeout: Duration) -> Result<RunOutput, String> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+async fn run(mut cmd: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<RunOutput, String> {
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    cmd.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = cmd.spawn().map_err(|e| format!("could not start {cmd:?}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {cmd:?}: {e}"))?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // Written alongside reading the output, so a full pipe cannot stall either side.
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(&input).await;
+        });
+    }
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| format!("timed out after {}s", timeout.as_secs()))?
@@ -396,13 +409,19 @@ async fn cached_run(build: &Path, stem: &str, key: &str) -> Option<RunOutput> {
 
 /// Runs Pandoc unless the last successful run had the same inputs. The hash is written last so
 /// an interrupted run is never mistaken for a cached one.
-async fn run_cached(build: &Path, stem: &str, key: String, cmd: Command) -> Result<(RunOutput, bool), String> {
+async fn run_cached(
+    build: &Path,
+    stem: &str,
+    key: String,
+    cmd: Command,
+    input: Option<Vec<u8>>,
+) -> Result<(RunOutput, bool), String> {
     if let Some(out) = cached_run(build, stem, &key).await {
         return Ok((out, false));
     }
     let hash = build.join(format!("{stem}.hash"));
     let _ = tokio::fs::remove_file(&hash).await;
-    let out = run(cmd, PANDOC_TIMEOUT).await?;
+    let out = run(cmd, PANDOC_TIMEOUT, input).await?;
     if out.success {
         let log = build.join(format!("{stem}.pandoc"));
         tokio::fs::write(&log, &out.text).await.map_err(|e| e.to_string())?;
@@ -449,6 +468,7 @@ async fn convert_parts(
     let limit = Arc::new(Semaphore::new(std::thread::available_parallelism().map_or(4, |n| n.get())));
     let mut conversion = Conversion { ok: true, converted: 0, diagnostics: Vec::new() };
     let mut jobs = JoinSet::new();
+    let mut marks: Vec<Option<Marked>> = fragments.iter().map(|_| None).collect();
     for (i, fragment) in fragments.iter().enumerate() {
         let content = match tokio::fs::read(dir.join(&fragment.part)).await {
             Ok(content) => content,
@@ -461,11 +481,14 @@ async fn convert_parts(
             }
         };
         let key = cache_key(&[pandoc_id.as_bytes(), &filter, &flags, &content]);
+        let marked = markers::mark_blocks(&String::from_utf8_lossy(&content));
+        let input = marked.text.clone().into_bytes();
+        marks[i] = Some(marked);
         let cmd = pandoc_fragment(tc, dir, fragment, options);
         let (build, stem, limit) = (build.to_path_buf(), fragment.name.clone(), limit.clone());
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.expect("the semaphore is never closed");
-            (i, run_cached(&build, &stem, key, cmd).await)
+            (i, run_cached(&build, &stem, key, cmd, Some(input)).await)
         });
     }
     let mut outputs: Vec<Option<RunOutput>> = fragments.iter().map(|_| None).collect();
@@ -475,18 +498,19 @@ async fn convert_parts(
         conversion.converted += usize::from(ran);
         outputs[i] = Some(out);
     }
-    for (fragment, out) in fragments.iter().zip(outputs) {
-        let Some(out) = out else { continue };
+    for ((fragment, out), marked) in fragments.iter().zip(outputs).zip(marks) {
+        let (Some(out), Some(marked)) = (out, marked) else { continue };
+        let out = RunOutput { text: marked.remap_messages(&out.text), ..out };
         conversion.ok &= out.success;
         conversion.diagnostics.extend(pandoc_diagnostics(&out, Some(&fragment.part)));
     }
     Ok(conversion)
 }
 
+/// Reads the part, with its block markers, from stdin.
 fn pandoc_fragment(tc: &Toolchain, dir: &Path, fragment: &Fragment, options: FragmentOptions) -> Command {
     let mut cmd = Command::new(&tc.pandoc);
     cmd.current_dir(dir)
-        .arg(&fragment.part)
         .args(["--from", "markdown", "--to", "latex", "--natbib"])
         // Keeps fragment lines aligned with Markdown lines for error mapping.
         .arg("--wrap=preserve")
@@ -610,11 +634,11 @@ pub async fn compile(
 
     let lists_before = writefile_key(&read_aux_tree(&build).await);
     let started = Instant::now();
-    let mut tex_out = run(tectonic(tc, dir, &build, mode, true), TEX_OFFLINE_TIMEOUT).await?;
+    let mut tex_out = run(tectonic(tc, dir, &build, mode, true), TEX_OFFLINE_TIMEOUT, None).await?;
     let mut blg = read_or_empty(&build.join("paper.blg")).await;
     if needs_network(&tex_out, &blg) {
         outcome.used_network = true;
-        tex_out = run(tectonic(tc, dir, &build, mode, false), TEX_ONLINE_TIMEOUT).await?;
+        tex_out = run(tectonic(tc, dir, &build, mode, false), TEX_ONLINE_TIMEOUT, None).await?;
         blg = read_or_empty(&build.join("paper.blg")).await;
     }
     outcome.tex_ms = started.elapsed().as_millis();
@@ -625,7 +649,7 @@ pub async fn compile(
     if !tex_out.success && !tex_diagnostics.iter().any(|d| d.severity == Severity::Error) {
         tex_diagnostics.push(Diagnostic::new(Severity::Error, "latex", last_meaningful_error(&tex_out.text)));
     }
-    locate_tex_lines(&mut tex_diagnostics, &build, &fragments).await;
+    locate_tex_lines(&mut tex_diagnostics, dir, &build, &fragments).await;
     outcome.diagnostics.extend(tex_diagnostics);
     outcome.diagnostics.extend(parse_blg(&blg));
 
@@ -676,7 +700,7 @@ async fn convert_main(
     tokio::fs::write(build.join(META_JSON), meta_json).await.map_err(|e| e.to_string())?;
     tokio::fs::write(build.join(MAIN_MARKDOWN), markdown).await.map_err(|e| e.to_string())?;
     let cmd = pandoc_main(tc, build, &meta.template, includeonly);
-    run_cached(build, MAIN_STEM, key, cmd).await.map(|(out, _)| out)
+    run_cached(build, MAIN_STEM, key, cmd, None).await.map(|(out, _)| out)
 }
 
 fn pandoc_main(tc: &Toolchain, build: &Path, template: &str, includeonly: Option<&str>) -> Command {
@@ -700,7 +724,7 @@ fn tectonic(tc: &Toolchain, dir: &Path, build: &Path, mode: CompileMode, offline
     let mut cmd = Command::new(&tc.tectonic);
     cmd.current_dir(dir)
         .env("TECTONIC_CACHE_DIR", &tc.tex_cache)
-        .args(["--bundle", BUNDLE_URL, "--keep-logs", "--keep-intermediates"])
+        .args(["--bundle", BUNDLE_URL, "--keep-logs", "--keep-intermediates", "--synctex"])
         .args(["--chatter", "minimal"])
         .arg("--outdir")
         .arg(build)
@@ -716,9 +740,11 @@ fn tectonic(tc: &Toolchain, dir: &Path, build: &Path, mode: CompileMode, offline
     cmd
 }
 
-/// Fills `part` and `source` for diagnostics that point at the main document or a fragment.
-async fn locate_tex_lines(diagnostics: &mut [Diagnostic], build: &Path, fragments: &[Fragment]) {
-    let mut files: HashMap<String, Vec<String>> = HashMap::new();
+/// Fills `part`, `part_line` and `source` for diagnostics that point at the main document or a
+/// fragment.
+async fn locate_tex_lines(diagnostics: &mut [Diagnostic], dir: &Path, build: &Path, fragments: &[Fragment]) {
+    // Per generated file: its text and, for fragments, the Markdown of the part.
+    let mut files: HashMap<String, (String, Option<String>)> = HashMap::new();
     for d in diagnostics {
         let (Some(file), Some(line)) = (d.file.clone(), d.line) else { continue };
         let fragment = fragments.iter().find(|f| f.tex_file() == file);
@@ -728,9 +754,15 @@ async fn locate_tex_lines(diagnostics: &mut [Diagnostic], build: &Path, fragment
         d.part = fragment.map(|f| f.part.clone());
         if !files.contains_key(&file) {
             let text = read_or_empty(&build.join(&file)).await;
-            files.insert(file.clone(), text.lines().map(str::to_string).collect());
+            let markdown = match fragment {
+                Some(f) => tokio::fs::read_to_string(dir.join(&f.part)).await.ok(),
+                None => None,
+            };
+            files.insert(file.clone(), (text, markdown));
         }
-        d.source = files[&file].get(line.saturating_sub(1)).map(|s| s.trim().to_string());
+        let (text, markdown) = &files[&file];
+        d.source = text.lines().nth(line.saturating_sub(1)).map(|s| s.trim().to_string());
+        d.part_line = markdown.as_deref().and_then(|md| BlockMap::new(text, md).markdown_line(line));
     }
 }
 
@@ -1358,6 +1390,171 @@ mod tests {
         assert!(!result.ok);
         let error = result.diagnostics.iter().find(|d| d.severity == Severity::Error).unwrap();
         assert_eq!(error.part.as_deref(), Some("missing.md"));
+    }
+
+    const EVERY_BLOCK: &str = r##"# Introduction {#sec:intro}
+Text right after the heading,
+on two lines with $x^2$ math.
+
+Second paragraph cites @knuth1984 and @fig:plot.
+
+- tight one
+- tight two
+  - nested tight
+
+1. loose one
+
+2. loose two
+
+   continuation paragraph
+
+   - nested loose
+
+     nested continuation
+
+3. loose three
+
+Term
+:   Definition one
+
+Term two
+
+:   Definition two
+
+> A quote
+> on two lines
+
+> Second quote
+
+    indented code
+
+    more indented code
+
+```python
+# not a heading
+
+x = 1
+```
+
+$$
+E = mc^2
+$$ {#eq:energy}
+
+::: {.note}
+Inside a div.
+
+Still inside.
+:::
+
+```{=latex}
+\begin{center}
+
+Raw block.
+\end{center}
+```
+
+\begin{center}
+Raw environment.
+
+Second paragraph inside.
+\end{center}
+
+| A | B |
+|---|---|
+| 1 | 2 |
+
+: Pipe caption {#tbl:pipe}
+
+-------------------------
+  Name   Value
+------- -------
+  first  1
+
+  second 2
+-------------------------
+
+: Multiline caption {#tbl:multi}
+
+![A plot](figures/plot.png){#fig:plot width=50%}
+
+Table: Caption before {#tbl:before}
+
+  C     D
+  ---   ---
+  3     4
+
+Table: Caption before an unindented table {#tbl:flush}
+
+E     F
+---   ---
+5     6
+
+<!-- a comment
+
+over two paragraphs -->
+
+Text with a note.[^n]
+
+[^n]: The note.
+
+    Its second paragraph.
+
+* * *
+
+Last paragraph,
+on two lines.
+"##;
+
+    async fn fragment_tex(markdown: &str, options: FragmentOptions) -> String {
+        let tc = dev_toolchain();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project::build_dir(tmp.path())).unwrap();
+        let fragment = Fragment { part: "a.md".into(), name: "part-a".into() };
+        let cmd = pandoc_fragment(&tc, tmp.path(), &fragment, options);
+        let out = run(cmd, PANDOC_TIMEOUT, Some(markdown.as_bytes().to_vec())).await.unwrap();
+        assert!(out.success, "{}", out.text);
+        std::fs::read_to_string(project::build_dir(tmp.path()).join("part-a.tex")).unwrap()
+    }
+
+    /// The fragment without its `%PF:N` lines and the blank line Pandoc puts after each.
+    fn without_markers(tex: &str) -> String {
+        let mut out = Vec::new();
+        let mut lines = tex.lines();
+        while let Some(line) = lines.next() {
+            if line.starts_with("%PF:") {
+                assert_eq!(lines.next(), Some(""), "a blank line follows {line}");
+            } else {
+                out.push(line);
+            }
+        }
+        out.join("\n")
+    }
+
+    #[tokio::test]
+    async fn block_markers_only_add_comment_lines() {
+        let marked = markers::mark_blocks(EVERY_BLOCK);
+        for chapters in [false, true] {
+            let options = FragmentOptions { chapters, numeric_only: false };
+            let plain = fragment_tex(EVERY_BLOCK, options).await;
+            let with_markers = fragment_tex(&marked.text, options).await;
+            assert_eq!(without_markers(&with_markers), plain.trim_end(), "chapters: {chapters}");
+            let comments: Vec<usize> = with_markers
+                .lines()
+                .filter_map(|l| l.strip_prefix("%PF:").and_then(|n| n.parse().ok()))
+                .collect();
+            assert_eq!(comments, marked.lines);
+        }
+
+        let tex = fragment_tex(&marked.text, FragmentOptions { chapters: false, numeric_only: false }).await;
+        let map = BlockMap::new(&tex, EVERY_BLOCK);
+        let md: Vec<&str> = EVERY_BLOCK.lines().collect();
+        let tex_lines: Vec<&str> = tex.lines().collect();
+        for wanted in ["on two lines with", "Second paragraph", "loose three", "Last paragraph", "on two lines."] {
+            let line = md.iter().position(|l| l.contains(wanted)).unwrap() + 1;
+            let (tex_line, _) = map.tex_line(line).unwrap();
+            assert!(tex_lines[tex_line - 1].contains(wanted), "{wanted}: {}", tex_lines[tex_line - 1]);
+            assert_eq!(map.markdown_line(tex_line), Some(line), "{wanted}");
+        }
     }
 
     #[tokio::test]
