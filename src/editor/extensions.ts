@@ -46,6 +46,7 @@ import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
 import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
+import { markdownFolding } from "./folding";
 
 const highlight = HighlightStyle.define([
   { tag: t.heading1, fontWeight: "700", fontSize: "1.25em", color: "var(--pf-syn-heading)" },
@@ -354,6 +355,7 @@ function base(): Extension[] {
     EditorView.lineWrapping,
     flashField,
     lintGutter(),
+    markdownFolding,
     keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap, ...lintKeymap, indentWithTab]),
   ];
 }

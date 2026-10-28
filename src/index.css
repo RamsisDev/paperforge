@@ -244,6 +244,38 @@ textarea,
   color: var(--pf-faint);
   pointer-events: none;
 }
+:root .cm-editor .pf-fold-gutter .cm-gutterElement {
+  padding: 0 3px 0 1px;
+}
+:root .cm-editor .pf-fold {
+  display: inline-flex;
+  vertical-align: -1px;
+  color: var(--pf-faint);
+  opacity: 0;
+  transition: opacity 120ms;
+}
+:root .cm-editor .cm-gutters:hover .pf-fold,
+:root .cm-editor .pf-fold-closed {
+  opacity: 1;
+}
+:root .cm-editor .pf-fold:hover,
+:root .cm-editor .pf-fold-closed {
+  color: var(--pf-accent);
+}
+:root .cm-editor .pf-fold-open svg {
+  transform: rotate(90deg);
+}
+:root .cm-editor .cm-foldPlaceholder {
+  margin: 0 6px;
+  padding: 0 5px;
+  border: 1px solid var(--pf-line);
+  border-radius: 4px;
+  background: var(--pf-raised);
+  color: var(--pf-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  cursor: default;
+}
 
 /* PDF preview */
 .pf-page {
