@@ -48,6 +48,7 @@ import { figureTools } from "./figureInspector";
 import { markdownFolding } from "./folding";
 import { editorModeExtension, previewDecorations } from "./livepreview";
 import { mathEditorKeymap } from "./livepreview/math";
+import { generatedNavigation, showLatex } from "./livepreview/showlatex";
 import { tableSlashCommand } from "./livepreview/table/insert";
 import { styleSlashCommands } from "./styles";
 
@@ -375,6 +376,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
     spellCheck,
     editorModeExtension(),
+    showLatex,
     onChange,
   ];
 }
@@ -384,7 +386,13 @@ export function bibExtensions(onChange: Extension): Extension[] {
 }
 
 export function texExtensions(): Extension[] {
-  return [...base(), EditorState.readOnly.of(true), markRegex(/\\[a-zA-Z@]+/g, "pf-attr"), markRegex(/\$[^$\n]+\$/g, "pf-math")];
+  return [
+    ...base(),
+    EditorState.readOnly.of(true),
+    markRegex(/\\[a-zA-Z@]+/g, "pf-attr"),
+    markRegex(/\$[^$\n]+\$/g, "pf-math"),
+    generatedNavigation,
+  ];
 }
 
 /** Hand-written LaTeX, such as the project's preamble.tex. */

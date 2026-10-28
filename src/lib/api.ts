@@ -214,7 +214,25 @@ export const api = {
   zoteroRead: (dir: string) => invoke<string | null>("zotero_read", { dir }),
   /** Starts watching the linked .bib (desktop only); false when nothing is watched. */
   zoteroWatch: (dir: string) => invoke<boolean>("zotero_watch", { dir }),
+  /**
+   * The generated LaTeX of the top-level block around a Markdown line (1-based) of a part, from
+   * its last fragment; `content` is the part as edited. Null before the part was typeset.
+   */
+  blockLatex: (dir: string, part: string, line: number, content: string) =>
+    invoke<BlockLatex | null>("block_latex", { dir, part, line, content }),
 };
+
+export interface BlockLatex {
+  /** The block's lines in the part's fragment, 1-based and inclusive. */
+  fromLine: number;
+  toLine: number;
+  /** The block's Markdown lines, 1-based and inclusive. */
+  markdownFrom: number;
+  markdownTo: number;
+  latex: string;
+  /** The part changed after it was last typeset. */
+  stale: boolean;
+}
 
 export interface BibLookup {
   key: string;

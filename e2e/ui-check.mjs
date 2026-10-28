@@ -59,6 +59,22 @@ function stubTauri(fixture) {
     if (i < 0) throw `No part ${file}`;
     return i;
   };
+  // Shaped like the backend's flattened view: part lines around each fragment, a `%PF:N` line
+  // and a blank line before each block, here with the Markdown standing in for its LaTeX.
+  const generatedTex = () => {
+    const out = ["\\begin{document}"];
+    for (const part of state.parts) {
+      out.push(`%PF-PART:${part.file}`);
+      const lines = part.content.replace(/\n+$/, "").split("\n");
+      lines.forEach((line, i) => {
+        if (line.trim() && (i === 0 || !lines[i - 1].trim())) out.push(`%PF:${i + 1}`, "");
+        out.push(line);
+      });
+      out.push("%PF-PART-END");
+    }
+    out.push("\\end{document}", "");
+    return out.join("\n");
+  };
 
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
   window.__TAURI_INTERNALS__ = {
@@ -175,7 +191,22 @@ function stubTauri(fixture) {
         case "read_binary":
           return (await file(args.path)).arrayBuffer();
         case "read_tex":
+          if (window.__pfGeneratedTex) return generatedTex();
           return (await file(`${state.dir}/.build/paper.tex`)).text();
+        // The blank-line-separated block around the line, with a few Markdown → LaTeX rewrites.
+        case "block_latex": {
+          const lines = args.content.split("\n");
+          if (!lines[args.line - 1]?.trim()) return null;
+          let from = args.line;
+          let to = args.line;
+          while (from > 1 && lines[from - 2].trim()) from--;
+          while (to < lines.length && lines[to].trim()) to++;
+          const latex = lines
+            .slice(from - 1, to)
+            .map((l) => l.replace(/\*\*(.+?)\*\*/g, "\\textbf{$1}").replace(/\[@([\w:-]+)\]/g, "\\citep{$1}").replace(/@([\w:-]+)/g, "\\ref{$1}"))
+            .join("\n");
+          return { fromLine: 40, toLine: 40 + to - from, markdownFrom: from, markdownTo: to, latex, stale: false };
+        }
         // No SyncTeX data unless a check sets an answer: the preview falls back to text matching.
         case "synctex_to_source":
           return window.__pfSynctexSource ?? null;
@@ -852,6 +883,59 @@ console.log("source mode: Mod-Alt-m opens the equation editor on", JSON.stringif
 await shot("23f-equation-editor-source-mode");
 await page.keyboard.press("Escape");
 console.log("source mode: escape leaves the document unchanged:", (await editorDoc()) === docAfter);
+
+// Show LaTeX: Mod-Alt-L opens the cursor block's generated LaTeX; converting it to a raw LaTeX
+// block is one edit that Mod-Z undoes. In Writing mode the "TeX" handle opens the same popover.
+const editorText = () =>
+  page.evaluate(async () => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    return EditorView.findFromDOM(document.querySelector(".cm-editor")).state.doc.toString();
+  });
+const latexPopover = page.getByRole("dialog", { name: "Generated LaTeX" });
+await page.locator(".cm-line", { hasText: "Inline math works" }).click({ position: { x: 60, y: 8 } });
+await page.keyboard.press("ControlOrMeta+Alt+l");
+await latexPopover.locator(".cm-line").first().waitFor({ timeout: 5000 });
+await settle(200);
+await shot("24-show-latex");
+console.log("show LaTeX, first line:", JSON.stringify(await latexPopover.locator(".cm-line").first().textContent()));
+const beforeConvert = await editorText();
+await latexPopover.getByRole("button", { name: "Convert to raw LaTeX…" }).click();
+await shot("24b-convert-confirm");
+console.log("convert warning:", JSON.stringify(await latexPopover.getByRole("alert").textContent()));
+await latexPopover.getByRole("button", { name: "Convert", exact: true }).click();
+await settle(200);
+const converted = (await editorText()).split("\n");
+const fenceAt = converted.indexOf("```{=latex}");
+console.log("converted Markdown:", JSON.stringify(converted.slice(Math.max(0, fenceAt - 1), converted.indexOf("```", fenceAt) + 2)));
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+console.log("undo restores the Markdown:", (await editorText()) === beforeConvert, "· popover open:", await latexPopover.count());
+await modeButton("Writing").click();
+await page.locator(".cm-line", { hasText: "Inline math works" }).click({ position: { x: 60, y: 8 } });
+await settle(200);
+await page.locator(".pf-showlatex-handle").click();
+await latexPopover.locator(".cm-line").first().waitFor({ timeout: 5000 });
+await shot("24c-show-latex-writing");
+console.log("writing mode TeX handle, first line:", JSON.stringify(await latexPopover.locator(".cm-line").first().textContent()));
+await page.keyboard.press("Escape");
+await settle(150);
+console.log("after Escape, popover open:", await latexPopover.count());
+await modeButton("Source").click();
+await settle(200);
+
+// The generated tab follows the Markdown cursor, and a double-click goes back to the Markdown.
+await page.evaluate(() => (window.__pfGeneratedTex = true));
+await page.locator(".cm-line", { hasText: "Raw LaTeX passes" }).click({ position: { x: 60, y: 8 } });
+await page.getByRole("tab", { name: "LaTeX (generated)" }).click();
+await settle(800);
+await shot("25-generated-follows");
+console.log("generated tab followed the cursor to:", JSON.stringify(await activeLineText()));
+await page.locator(".cm-line", { hasText: "Lists, *emphasis*" }).first().dblclick({ position: { x: 60, y: 8 } });
+await settle(500);
+console.log("generated double-click jumped to:", await editorTab(), "/", JSON.stringify(await activeLineText()));
+await page.evaluate(() => (window.__pfGeneratedTex = false));
+await openChapter("Method");
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer, with the cursor in view, in Source and Writing mode.

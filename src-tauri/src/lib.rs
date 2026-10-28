@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod layout;
 pub mod markers;
 pub mod project;
+pub mod showlatex;
 pub mod styles;
 pub mod synctex;
 pub mod zotero;
@@ -18,6 +19,7 @@ use backend::{Backend, EngineInfo};
 use bibfetch::Lookup;
 use compiler::{CompileMode, CompileOutcome, Toolchain};
 use project::{PaperMeta, ProjectSnapshot};
+use showlatex::BlockLatex;
 use synctex::{PdfBox, SourceSpot};
 
 fn sidecar(name: &str) -> PathBuf {
@@ -106,7 +108,7 @@ async fn read_binary(path: String) -> Result<Response, String> {
 
 #[tauri::command]
 async fn read_tex(dir: String) -> Result<String, String> {
-    compiler::flatten_tex(&project::build_dir(Path::new(&dir))).await
+    compiler::flatten_tex(Path::new(&dir)).await
 }
 
 #[tauri::command]
@@ -215,6 +217,11 @@ async fn zotero_watch(app: AppHandle, watch: State<'_, ZoteroWatch>, dir: String
     Ok(true)
 }
 
+#[tauri::command]
+async fn block_latex(dir: String, part: String, line: usize, content: Option<String>) -> Result<Option<BlockLatex>, String> {
+    showlatex::block_latex(Path::new(&dir), &part, line, content).await
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -277,6 +284,7 @@ pub fn run() {
             zotero_link,
             zotero_read,
             zotero_watch,
+            block_latex,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

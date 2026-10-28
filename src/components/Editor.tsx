@@ -13,9 +13,11 @@ import {
   texExtensions,
 } from "@/editor/extensions";
 import { syncEditorMode } from "@/editor/livepreview";
+import { generatedLine } from "@/editor/livepreview/showlatex";
+import type { SourceSpot } from "@/lib/api";
 import { locate } from "@/lib/diagnostics";
 import { setBib, setPart, setPreamble } from "@/session";
-import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, openFind, store, useStore, type EditorFile } from "@/store";
+import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, isPartFile, openFind, store, useStore, type EditorFile } from "@/store";
 
 type Contents = Map<EditorFile, string>;
 
@@ -50,6 +52,8 @@ export function Editor() {
   const emitted = useRef(new Map<EditorFile, string>());
   /** Set while a change from outside the editor is applied, so it is not saved back. */
   const applyingExternal = useRef(false);
+  /** The Markdown cursor the generated LaTeX follows: the last part's, when the tab was left. */
+  const markdownSpot = useRef<SourceSpot | null>(null);
   const dir = useStore((s) => s.dir);
   const activeFile = useStore((s) => s.activeFile);
 
@@ -94,6 +98,7 @@ export function Editor() {
     states.current = new Map();
     scroll.current = new Map();
     emitted.current = new Map();
+    markdownSpot.current = null;
     const file = store.get().activeFile;
     current.current = file;
     const view = new EditorView({ state: createState(file), parent: host.current });
@@ -128,6 +133,9 @@ export function Editor() {
     if (contents(store.get()).has(current.current)) {
       states.current.set(current.current, view.state);
       scroll.current.set(current.current, view.scrollDOM.scrollTop);
+      if (isPartFile(current.current)) {
+        markdownSpot.current = { part: current.current, line: view.state.doc.lineAt(view.state.selection.main.head).number };
+      }
     }
     let next = states.current.get(activeFile);
     if (!next || (activeFile === TEX_FILE && next.doc.toString() !== store.get().tex)) {
@@ -137,9 +145,28 @@ export function Editor() {
     syncChapterTemplate(view);
     syncEditorMode(view);
     current.current = activeFile;
-    requestAnimationFrame(() => (view.scrollDOM.scrollTop = scroll.current.get(activeFile) ?? 0));
+    requestAnimationFrame(() => {
+      if (activeFile !== TEX_FILE || !followMarkdown()) view.scrollDOM.scrollTop = scroll.current.get(activeFile) ?? 0;
+    });
     applyLint();
   }, [activeFile]);
+
+  /** Scrolls the generated LaTeX to the block of the Markdown cursor; false when it is not there. */
+  function followMarkdown(): boolean {
+    const view = viewRef.current;
+    const spot = markdownSpot.current;
+    if (!view || !spot || current.current !== TEX_FILE) return false;
+    const target = generatedLine(view.state.doc, spot.part, spot.line);
+    if (!target) return false;
+    const doc = view.state.doc;
+    const line = doc.line(target.line);
+    view.dispatch({
+      selection: EditorSelection.cursor(line.from),
+      effects: [EditorView.scrollIntoView(doc.line(target.marker).from, { y: "start", yMargin: 48 }), flashLine.of(line.from)],
+    });
+    setTimeout(() => viewRef.current?.dispatch({ effects: flashLine.of(null) }), 1300);
+    return true;
+  }
 
   // Content changed outside the editor: a structure command reloaded parts, the sidebar
   // inserted a bib entry, paper.tex was regenerated.
@@ -164,6 +191,7 @@ export function Editor() {
             } finally {
               applyingExternal.current = false;
             }
+            if (file === TEX_FILE) followMarkdown();
           }
         }
       }),

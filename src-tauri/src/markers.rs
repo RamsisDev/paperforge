@@ -320,6 +320,26 @@ fn best_by_words(target: &str, candidates: &[&str]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+fn is_tex_marker(line: &str) -> bool {
+    line.trim().strip_prefix(TEX_MARKER).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The LaTeX without its `%PF:N` lines and the blank line Pandoc puts after each, as exported.
+pub fn strip_markers(tex: &str) -> String {
+    let mut out = String::with_capacity(tex.len());
+    let mut lines = tex.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if is_tex_marker(line) {
+            if lines.peek().is_some_and(|l| is_blank(l)) {
+                lines.next();
+            }
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Block {
     /// The block's first Markdown line.
@@ -334,6 +354,13 @@ fn trimmed_range(lines: &[&str], from: usize, to: usize) -> (usize, usize) {
     let start = (from..=to).find(non_blank).unwrap_or(from);
     let end = (start..=to).rev().find(non_blank).unwrap_or(start);
     (start, end)
+}
+
+/// One top-level block on both sides: 1-based inclusive line ranges, blank edges trimmed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockSpan {
+    pub tex: (usize, usize),
+    pub markdown: (usize, usize),
 }
 
 /// The `%PF:N` markers of one fragment, with the Markdown it came from.
@@ -395,6 +422,19 @@ impl<'a> BlockMap<'a> {
         let k = self.blocks.iter().rposition(|b| b.markdown <= markdown_line)?;
         let (tex, md) = self.ranges(k);
         Some((Self::map_line(markdown_line.max(md.0), md, &self.markdown, tex, &self.tex), tex))
+    }
+
+    /// The block a Markdown line belongs to: the last one starting at or before it.
+    pub fn block(&self, markdown_line: usize) -> Option<BlockSpan> {
+        let k = self.blocks.iter().rposition(|b| b.markdown <= markdown_line)?;
+        let (tex, markdown) = self.ranges(k);
+        Some(BlockSpan { tex, markdown })
+    }
+
+    /// The fragment lines `from..=to` without marker lines.
+    pub fn tex_text(&self, (from, to): (usize, usize)) -> String {
+        let lines = self.tex.get(from.saturating_sub(1)..to.min(self.tex.len())).unwrap_or_default();
+        lines.iter().filter(|l| !is_tex_marker(l)).copied().collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -508,5 +548,55 @@ mod tests {
         assert_eq!(map.tex_line(8), Some((17, (12, 18))));
         assert_eq!(map.tex_line(1), Some((3, (3, 3))));
         assert_eq!(BlockMap::new("no markers", MARKDOWN).markdown_line(1), None);
+    }
+
+    fn block_of(tex: &str, markdown: &str, line: usize) -> Option<(BlockSpan, String)> {
+        let map = BlockMap::new(tex, markdown);
+        map.block(line).map(|b| (b, map.tex_text(b.tex)))
+    }
+
+    #[test]
+    fn blocks_cover_first_last_and_list_blocks() {
+        let (first, latex) = block_of(TEX, MARKDOWN, 1).unwrap();
+        assert_eq!(first, BlockSpan { tex: (3, 3), markdown: (1, 1) });
+        assert_eq!(latex, "\\section{Intro}\\label{intro}");
+        let (paragraph, latex) = block_of(TEX, MARKDOWN, 4).unwrap();
+        assert_eq!(paragraph, BlockSpan { tex: (7, 8), markdown: (3, 4) });
+        assert_eq!(latex, "First line\nsecond line.");
+        let (list, latex) = block_of(TEX, MARKDOWN, 7).unwrap();
+        assert_eq!(list, BlockSpan { tex: (12, 18), markdown: (6, 7) });
+        assert!(latex.starts_with("\\begin{itemize}") && latex.ends_with("\\end{itemize}"), "{latex}");
+        // The blank line after a block belongs to it.
+        assert_eq!(block_of(TEX, MARKDOWN, 8).unwrap().0, list);
+        let (last, latex) = block_of(TEX, MARKDOWN, 9).unwrap();
+        assert_eq!(last, BlockSpan { tex: (22, 22), markdown: (9, 9) });
+        assert_eq!(latex, "End.");
+    }
+
+    #[test]
+    fn lines_without_a_marker_of_their_own_belong_to_the_block_before() {
+        let markdown = "Text.\n\n$$\nE = mc^2\n$$ {#eq:x}\n\n| a |\n|---|\n| 1 |\n\n: Cap {#tbl:t}\n";
+        assert_eq!(mark_blocks(markdown).lines, [1, 3, 7]);
+        let tex = "%PF:1\n\nText.\n\n%PF:3\n\n\\begin{equation}\nE = mc^2\\label{eq:x}\\end{equation}\n\n\
+                   %PF:7\n\n\\begin{table}\n\\caption{Cap}\\label{tbl:t}\n\\end{table}\n";
+        let (math, latex) = block_of(tex, markdown, 4).unwrap();
+        assert_eq!(math.markdown, (3, 5));
+        assert_eq!(latex, "\\begin{equation}\nE = mc^2\\label{eq:x}\\end{equation}");
+        let (table, latex) = block_of(tex, markdown, 11).unwrap();
+        assert_eq!(table.markdown, (7, 11));
+        assert!(latex.contains("\\caption{Cap}"), "{latex}");
+        // A title block has no marker and no block.
+        assert_eq!(block_of("%PF:4\n\nText.\n", "% Title\n% Author\n\nText.\n", 1), None);
+    }
+
+    #[test]
+    fn stripping_markers_leaves_the_plain_fragment() {
+        assert_eq!(
+            strip_markers(TEX),
+            "\\section{Intro}\\label{intro}\n\nFirst line\nsecond line.\n\n\\begin{itemize}\n\\tightlist\n\\item\n  \
+             apple pie\n\\item\n  banana split\n\\end{itemize}\n\nEnd.\n"
+        );
+        assert_eq!(strip_markers("%PF:x\n%PF:\nText %PF:3\n"), "%PF:x\n%PF:\nText %PF:3\n");
+        assert_eq!(strip_markers("%PF:1\r\n\r\nText.\r\n"), "Text.\r\n");
     }
 }
