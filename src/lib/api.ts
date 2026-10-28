@@ -28,6 +28,18 @@ export interface PaperMeta {
   classOptions: string[];
   /** Project copy of the template from "Eject template", e.g. "template/article.tex"; "" for the built-in one. */
   templateFile: string;
+  /** Div and span classes typeset with their LaTeX; absent until the project has one. */
+  styles?: Style[];
+}
+
+export type StyleKind = "paragraph" | "character";
+
+export interface Style {
+  /** The div (`::: {.name}`) or span (`[text]{.name}`) class. */
+  name: string;
+  kind: StyleKind;
+  /** LaTeX around `#1`, which stands for the styled text. */
+  latex: string;
 }
 
 export interface Part {
