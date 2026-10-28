@@ -1,0 +1,15 @@
+$if(toc)$
+$-- Local: figure and table entries are level 1, so a global tocdepth of 0 would empty the lists.
+\begingroup
+$if(toc-depth)$
+\value{tocdepth}=$toc-depth$\relax
+$endif$
+\tableofcontents
+\endgroup
+$endif$
+$if(lof)$
+\listoffigures
+$endif$
+$if(lot)$
+\listoftables
+$endif$

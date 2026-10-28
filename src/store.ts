@@ -1,9 +1,18 @@
 import { create } from "zustand";
-import type { Diagnostic, PaperMeta } from "@/lib/api";
+import type { Diagnostic, PaperMeta, Part, TocEntry } from "@/lib/api";
 
-export type EditorFile = "paper.md" | "refs.bib" | "paper.tex";
-export type SidebarTab = "paper" | "outline" | "refs" | "figures";
+export const BIB_FILE = "refs.bib";
+export const TEX_FILE = "paper.tex";
+
+/** A Markdown part path, `BIB_FILE` or `TEX_FILE`. */
+export type EditorFile = string;
+export type SidebarTab = "paper" | "structure" | "refs" | "figures";
 export type Theme = "light" | "dark";
+export type GalleryMode = "create" | "change";
+
+export function isPartFile(file: EditorFile): boolean {
+  return file !== BIB_FILE && file !== TEX_FILE;
+}
 
 export interface CompileStatus {
   state: "idle" | "running" | "ok" | "error";
@@ -23,7 +32,7 @@ export interface Jump {
 interface State {
   dir: string | null;
   meta: PaperMeta | null;
-  body: string;
+  parts: Part[];
   bib: string;
   tex: string;
   figures: string[];
@@ -33,6 +42,8 @@ interface State {
   saveError: string | null;
   compile: CompileStatus;
   diagnostics: Diagnostic[];
+  /** Contents, figures and tables of the last successful compile, as LaTeX numbered them. */
+  toc: TocEntry[];
   pdf: { data: Uint8Array; version: number } | null;
 
   theme: Theme;
@@ -40,9 +51,16 @@ interface State {
   sidebarOpen: boolean;
   problemsOpen: boolean;
   cursor: { line: number; col: number };
+  /** Preview compiles only the chapter being edited (report and book templates). */
+  previewFocus: boolean;
+  gallery: GalleryMode | null;
+  /** Index where the Structure tab is asking for a new part's title. */
+  addingPart: number | null;
 
   jump: Jump | null;
   previewReveal: { text: string; nonce: number } | null;
+  pageReveal: { page: number; nonce: number } | null;
+  contentsReveal: number;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
@@ -51,18 +69,21 @@ const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ?
 export const initialProjectState = {
   dir: null,
   meta: null,
-  body: "",
+  parts: [] as Part[],
   bib: "",
   tex: "",
   figures: [],
-  activeFile: "paper.md" as EditorFile,
+  activeFile: "" as EditorFile,
   saveState: "saved" as const,
   saveError: null,
   compile: { state: "idle", ms: null, usedNetwork: false, passes: 0 } as CompileStatus,
   diagnostics: [],
+  toc: [],
   pdf: null,
+  addingPart: null,
   jump: null,
   previewReveal: null,
+  pageReveal: null,
 };
 
 export const useStore = create<State>(() => ({
@@ -72,6 +93,9 @@ export const useStore = create<State>(() => ({
   sidebarOpen: true,
   problemsOpen: false,
   cursor: { line: 1, col: 1 },
+  previewFocus: localStorage.getItem("paperforge.previewFocus") === "1",
+  gallery: null,
+  contentsReveal: 0,
 }));
 
 export const store = {
@@ -85,8 +109,31 @@ export function jumpTo(file: EditorFile, line: number) {
   store.set({ activeFile: file, jump: { file, line, nonce: ++nonce } });
 }
 
+export function openFile(file: EditorFile) {
+  store.set({ activeFile: file });
+}
+
 export function revealInPreview(text: string) {
   store.set({ previewReveal: { text, nonce: ++nonce } });
+}
+
+/** Scrolls the preview to a printed (arabic) page number. */
+export function revealPage(page: number) {
+  store.set({ pageReveal: { page, nonce: ++nonce } });
+}
+
+export function openGallery(mode: GalleryMode) {
+  store.set({ gallery: mode });
+}
+
+/** Opens the Paper tab at its Contents settings. */
+export function showContentsSettings() {
+  store.set((s) => ({ sidebarOpen: true, sidebarTab: "paper", contentsReveal: s.contentsReveal + 1 }));
+}
+
+/** Opens the Structure tab asking for the title of a part to insert at `index`. */
+export function askNewPart(index: number) {
+  store.set({ sidebarOpen: true, sidebarTab: "structure", addingPart: index });
 }
 
 export function setTheme(theme: Theme) {

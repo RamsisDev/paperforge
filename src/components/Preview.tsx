@@ -1,4 +1,4 @@
-import { LoaderCircle, Maximize2, ScanText, ZoomIn, ZoomOut } from "lucide-react";
+import { Focus, LoaderCircle, Maximize2, ScanText, ZoomIn, ZoomOut } from "lucide-react";
 import {
   GlobalWorkerOptions,
   RenderingCancelledException,
@@ -11,9 +11,13 @@ import {
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { editorBridge } from "@/editor/bridge";
+import { bestLineInParts } from "@/lib/parts";
+import { usesChapters } from "@/lib/templates";
 import { bestLine } from "@/lib/textmatch";
-import { jumpTo, revealInPreview, store, useStore } from "@/store";
-import { IconButton, MOD } from "./ui";
+import { pdfPageIndex } from "@/lib/toc";
+import { setPreviewFocus } from "@/session";
+import { isPartFile, jumpTo, revealInPreview, store, useStore } from "@/store";
+import { IconButton, MOD, cx } from "./ui";
 
 // One worker for every document the session loads.
 GlobalWorkerOptions.workerPort = new Worker(workerUrl, { type: "module" });
@@ -163,6 +167,8 @@ export function Preview() {
   const [currentPage, setCurrentPage] = useState(1);
   const [reveal, setReveal] = useState<{ page: number; top: number; height: number; key: number } | null>(null);
   const linesCache = useRef<{ version: number; lines: Promise<TextLine[]>[] } | null>(null);
+  const chapters = useStore((s) => usesChapters(s.meta?.template));
+  const previewFocus = useStore((s) => s.previewFocus);
 
   useEffect(() => localStorage.setItem("paperforge.zoom", String(zoom)), [zoom]);
 
@@ -253,9 +259,24 @@ export function Preview() {
       text += ` ${next.textContent ?? ""}`;
     }
     const clicked = window.getSelection()?.toString();
-    const match = bestLine(text, store.get().body.split("\n"), clicked);
-    if (match) jumpTo("paper.md", match.line);
+    const match = bestLineInParts(text, store.get().parts, clicked);
+    if (match) jumpTo(match.file, match.line);
   }
+
+  // Contents entry clicked: scroll to its printed page.
+  useEffect(
+    () =>
+      useStore.subscribe(async (s, prev) => {
+        const request = s.pageReveal;
+        const el = scroller.current;
+        if (!request || request === prev.pageReveal || !doc || !el) return;
+        const labels = await doc.proxy.getPageLabels().catch(() => null);
+        const index = pdfPageIndex(request.page, labels, doc.sizes.length);
+        if (index === null) return;
+        el.scrollTo({ top: pageTops()[index] - PADDING / 2, behavior: "smooth" });
+      }),
+    [doc, scale],
+  );
 
   // Cursor -> PDF: scroll to the best-matching line of text and flash it.
   useEffect(
@@ -283,18 +304,36 @@ export function Preview() {
 
   function revealCursor() {
     const view = editorBridge.view;
-    if (view) revealInPreview(view.state.doc.lineAt(view.state.selection.main.head).text);
+    if (view && isPartFile(store.get().activeFile)) {
+      revealInPreview(view.state.doc.lineAt(view.state.selection.main.head).text);
+    }
   }
 
   const empty = !doc;
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--pf-preview-bg)]">
-      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
+      <div className="@container flex h-9 shrink-0 items-center gap-1 whitespace-nowrap border-b border-line bg-panel px-2">
         <span className="px-1 text-xs tabular-nums text-muted">
           {doc ? `Page ${currentPage} of ${doc.sizes.length}` : "Preview"}
         </span>
         {compileState === "running" && <LoaderCircle size={14} className="animate-spin text-accent" aria-label="Compiling" />}
         <div className="flex-1" />
+        {chapters && (
+          <button
+            type="button"
+            aria-pressed={previewFocus}
+            aria-label="Current chapter only"
+            onClick={() => setPreviewFocus(!previewFocus)}
+            title="Preview: typeset only the chapter you are editing (faster on long documents). Typeset builds everything."
+            className={cx(
+              "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs transition-colors cursor-default",
+              previewFocus ? "bg-accent-soft text-accent" : "text-muted hover:bg-raised hover:text-fg",
+            )}
+          >
+            <Focus size={14} />
+            <span className="hidden @min-[30rem]:inline">Current chapter only</span>
+          </button>
+        )}
         <IconButton label="Show cursor position in PDF" onClick={revealCursor} disabled={empty}>
           <ScanText size={15} />
         </IconButton>

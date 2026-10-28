@@ -5,14 +5,16 @@ import { useEffect, useRef } from "react";
 import { editorBridge } from "@/editor/bridge";
 import { bibExtensions, flashLine, markdownExtensions, texExtensions } from "@/editor/extensions";
 import { locate } from "@/lib/diagnostics";
-import { setBib, setBody } from "@/session";
-import { store, useStore, type EditorFile } from "@/store";
+import { setBib, setPart } from "@/session";
+import { BIB_FILE, TEX_FILE, store, useStore, type EditorFile } from "@/store";
 
-const FILES: EditorFile[] = ["paper.md", "refs.bib", "paper.tex"];
+type Contents = Map<EditorFile, string>;
 
-function contentOf(file: EditorFile): string {
-  const s = store.get();
-  return file === "paper.md" ? s.body : file === "refs.bib" ? s.bib : s.tex;
+function contents(s: ReturnType<typeof store.get>): Contents {
+  const map: Contents = new Map(s.parts.map((p) => [p.file, p.content]));
+  map.set(BIB_FILE, s.bib);
+  map.set(TEX_FILE, s.tex);
+  return map;
 }
 
 export function Editor() {
@@ -20,19 +22,21 @@ export function Editor() {
   const viewRef = useRef<EditorView | null>(null);
   const states = useRef(new Map<EditorFile, EditorState>());
   const scroll = useRef(new Map<EditorFile, number>());
-  const current = useRef<EditorFile>("paper.md");
+  const current = useRef<EditorFile>("");
   /** Text this editor last wrote to the store, so its own echoes are not re-applied. */
   const emitted = useRef(new Map<EditorFile, string>());
+  /** Set while a change from outside the editor is applied, so it is not saved back. */
+  const applyingExternal = useRef(false);
   const dir = useStore((s) => s.dir);
   const activeFile = useStore((s) => s.activeFile);
 
   function createState(file: EditorFile): EditorState {
     const onChange = EditorView.updateListener.of((u) => {
-      if (u.docChanged) {
+      if (u.docChanged && !applyingExternal.current) {
         const text = u.state.doc.toString();
         emitted.current.set(file, text);
-        if (file === "paper.md") setBody(text);
-        else if (file === "refs.bib") setBib(text);
+        if (file === BIB_FILE) setBib(text);
+        else if (file !== TEX_FILE) setPart(file, text);
       }
       if (u.selectionSet || u.docChanged) {
         const head = u.state.selection.main.head;
@@ -41,8 +45,8 @@ export function Editor() {
       }
     });
     const extensions =
-      file === "paper.md" ? markdownExtensions(onChange) : file === "refs.bib" ? bibExtensions(onChange) : texExtensions();
-    return EditorState.create({ doc: contentOf(file), extensions });
+      file === BIB_FILE ? bibExtensions(onChange) : file === TEX_FILE ? texExtensions() : markdownExtensions(onChange);
+    return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions });
   }
 
   // One view per project; documents swap underneath it.
@@ -50,9 +54,10 @@ export function Editor() {
     if (!host.current) return;
     states.current = new Map();
     scroll.current = new Map();
-    current.current = "paper.md";
-    const view = new EditorView({ state: createState("paper.md"), parent: host.current });
-    states.current.set("paper.md", view.state);
+    emitted.current = new Map();
+    const file = store.get().activeFile;
+    current.current = file;
+    const view = new EditorView({ state: createState(file), parent: host.current });
     viewRef.current = view;
     editorBridge.view = view;
     view.focus();
@@ -67,10 +72,12 @@ export function Editor() {
   useEffect(() => {
     const view = viewRef.current;
     if (!view || current.current === activeFile) return;
-    states.current.set(current.current, view.state);
-    scroll.current.set(current.current, view.scrollDOM.scrollTop);
+    if (contents(store.get()).has(current.current)) {
+      states.current.set(current.current, view.state);
+      scroll.current.set(current.current, view.scrollDOM.scrollTop);
+    }
     let next = states.current.get(activeFile);
-    if (!next || (activeFile === "paper.tex" && next.doc.toString() !== store.get().tex)) {
+    if (!next || (activeFile === TEX_FILE && next.doc.toString() !== store.get().tex)) {
       next = createState(activeFile);
     }
     view.setState(next);
@@ -79,22 +86,28 @@ export function Editor() {
     applyLint();
   }, [activeFile]);
 
-  // Content changed outside the editor (sidebar inserted a bib entry, paper.tex regenerated).
+  // Content changed outside the editor: a structure command reloaded parts, the sidebar
+  // inserted a bib entry, paper.tex was regenerated.
   useEffect(
     () =>
       useStore.subscribe((s, prev) => {
         const view = viewRef.current;
-        if (!view) return;
-        for (const file of FILES) {
-          const value = file === "paper.md" ? s.body : file === "refs.bib" ? s.bib : s.tex;
-          const before = file === "paper.md" ? prev.body : file === "refs.bib" ? prev.bib : prev.tex;
-          if (value === before || value === emitted.current.get(file)) continue;
-          if (file === current.current) {
-            if (view.state.doc.toString() !== value) {
-              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
-            }
-          } else {
+        if (!view || (s.parts === prev.parts && s.bib === prev.bib && s.tex === prev.tex)) return;
+        const now = contents(s);
+        const before = contents(prev);
+        for (const file of before.keys()) if (!now.has(file)) states.current.delete(file);
+        for (const [file, value] of now) {
+          if (value === before.get(file) || value === emitted.current.get(file)) continue;
+          emitted.current.delete(file);
+          if (file !== current.current) {
             states.current.delete(file);
+          } else if (view.state.doc.toString() !== value) {
+            applyingExternal.current = true;
+            try {
+              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
+            } finally {
+              applyingExternal.current = false;
+            }
           }
         }
       }),
@@ -104,11 +117,11 @@ export function Editor() {
   function applyLint() {
     const view = viewRef.current;
     if (!view) return;
-    const { diagnostics, body } = store.get();
+    const { diagnostics, parts } = store.get();
     const file = current.current;
     const doc = view.state.doc;
     const marks: CmDiagnostic[] = [];
-    for (const d of locate(diagnostics, body)) {
+    for (const d of locate(diagnostics, parts)) {
       if (d.file !== file || d.line === null || d.line >= doc.lines) continue;
       const line = doc.line(d.line + 1);
       marks.push({
@@ -124,7 +137,7 @@ export function Editor() {
 
   useEffect(() => useStore.subscribe((s, prev) => s.diagnostics !== prev.diagnostics && applyLint()), []);
 
-  // Jump requests from the outline, problems panel and the PDF preview.
+  // Jump requests from the structure tab, problems panel and the PDF preview.
   useEffect(
     () =>
       useStore.subscribe((s, prev) => {

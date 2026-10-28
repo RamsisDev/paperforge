@@ -8,5 +8,6 @@
   "abstract": "This sample shows every feature PaperForge supports: sections, citations, numbered equations, figures, tables and cross references. Edit it or start from scratch.",
   "keywords": ["typesetting", "LaTeX", "Markdown"],
   "language": "en",
-  "date": ""
+  "date": "",
+  "parts": ["sections/introduction.md", "sections/method.md", "sections/conclusion.md"]
 }

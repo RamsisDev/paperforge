@@ -1,31 +1,39 @@
-import type { Diagnostic } from "./api";
+import type { Diagnostic, Part } from "./api";
+import { bestLineInParts, findInParts } from "./parts";
 import { bestLine } from "./textmatch";
 
 export interface Located {
   diagnostic: Diagnostic;
-  /** Where the editor should jump: the Markdown line when it can be found. */
-  file: "paper.md" | "refs.bib" | "paper.tex" | null;
+  /** Where the editor should jump: a Markdown part when the line can be found, else refs.bib or paper.tex. */
+  file: string | null;
   /** 0-based. */
   line: number | null;
 }
 
-/** Maps paper.tex lines back to paper.md by matching the generated text against the source. */
-export function locate(diagnostics: Diagnostic[], body: string): Located[] {
-  const lines = body.split("\n");
-  return diagnostics.map((diagnostic) => {
+/** Maps generated-LaTeX lines back to Markdown by matching the generated text against the parts. */
+export function locate(diagnostics: Diagnostic[], parts: Part[]): Located[] {
+  const byFile = new Map(parts.map((p) => [p.file, p]));
+  return diagnostics.map((diagnostic): Located => {
     if (diagnostic.file === "refs.bib" && diagnostic.line) {
       return { diagnostic, file: "refs.bib", line: diagnostic.line - 1 };
     }
-    if (diagnostic.file === "paper.tex" && diagnostic.line) {
-      const match = diagnostic.source ? bestLine(diagnostic.source, lines) : null;
-      return match
-        ? { diagnostic, file: "paper.md", line: match.line }
-        : { diagnostic, file: "paper.tex", line: diagnostic.line - 1 };
+    const part = diagnostic.part ? byFile.get(diagnostic.part) : undefined;
+    if (part && diagnostic.source) {
+      const match = bestLine(diagnostic.source, part.content.split("\n"));
+      if (match) return { diagnostic, file: part.file, line: match.line };
+    }
+    if (diagnostic.source && !part) {
+      const match = bestLineInParts(diagnostic.source, parts);
+      if (match) return { diagnostic, file: match.file, line: match.line };
     }
     const citation = /Citation `([^']+)'/.exec(diagnostic.message);
     if (citation) {
-      const at = lines.findIndex((l) => l.includes(`@${citation[1]}`));
-      if (at >= 0) return { diagnostic, file: "paper.md", line: at };
+      const at = findInParts(parts, `@${citation[1]}`);
+      if (at) return { diagnostic, ...at };
+    }
+    if (part) return { diagnostic, file: part.file, line: 0 };
+    if (diagnostic.file === "paper.tex" && diagnostic.line) {
+      return { diagnostic, file: "paper.tex", line: diagnostic.line - 1 };
     }
     return { diagnostic, file: null, line: null };
   });

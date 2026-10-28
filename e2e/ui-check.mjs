@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Drives the real frontend (from the running `npm run tauri dev` Vite server) in headless Chrome,
-// with Tauri's IPC replaced by a stub that serves a real project folder and its compiled PDF.
+// Drives the real frontend (from the running Vite dev server on :1420) in headless Chrome,
+// with Tauri's IPC replaced by a stub that serves a multi-part project folder from memory:
+// structure commands (create/delete/reorder/split/merge) work on that copy, and `compile`
+// returns the folder's real PDF and the contents LaTeX wrote for it.
 //
-// Usage: node e2e/ui-check.mjs <project-dir> <out-dir>
-//   The project must have been compiled once (by the app or `npm run warm-tex-cache`).
+// Usage: node e2e/make-fixture.mjs /tmp/pf-multipart   (once: splits the sample, typesets it)
+//        node e2e/ui-check.mjs /tmp/pf-multipart <out-dir>
 
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 
@@ -16,18 +18,43 @@ if (!projectDir || !outDir) {
 }
 mkdirSync(outDir, { recursive: true });
 
-const snapshot = {
+const meta = JSON.parse(readFileSync(join(projectDir, "paper.json"), "utf8"));
+const fixture = {
   dir: projectDir,
-  meta: JSON.parse(readFileSync(join(projectDir, "paper.json"), "utf8")),
-  body: readFileSync(join(projectDir, "paper.md"), "utf8"),
+  meta,
+  parts: meta.parts.map((file) => ({ file, content: readFileSync(join(projectDir, file), "utf8") })),
   bib: readFileSync(join(projectDir, "refs.bib"), "utf8"),
-  figures: ["figures/example.png"],
+  figures: readdirSync(join(projectDir, "figures")).map((f) => `figures/${f}`),
+  toc: JSON.parse(readFileSync(join(projectDir, ".build/toc.json"), "utf8")),
 };
 
-function stubTauri(snapshot) {
+function stubTauri(fixture) {
   const calls = [];
   window.__pfCalls = calls;
+  const state = structuredClone(fixture);
   let id = 0;
+
+  const slug = (text) =>
+    text.toLowerCase().replace(/\{[^}]*\}/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "part";
+  const uniqueFile = (title) => {
+    const taken = new Set(state.parts.map((p) => p.file));
+    let file = `sections/${slug(title)}.md`;
+    for (let n = 2; taken.has(file); n++) file = `sections/${slug(title)}-${n}.md`;
+    return file;
+  };
+  const snapshot = () => ({
+    dir: state.dir,
+    meta: { ...state.meta, parts: state.parts.map((p) => p.file) },
+    parts: state.parts.map((p) => ({ ...p })),
+    bib: state.bib,
+    figures: state.figures,
+  });
+  const indexOf = (file) => {
+    const i = state.parts.findIndex((p) => p.file === file);
+    if (i < 0) throw `No part ${file}`;
+    return i;
+  };
+
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
@@ -39,36 +66,98 @@ function stubTauri(snapshot) {
     unregisterCallback() {},
     convertFileSrc: (p) => p,
     async invoke(cmd, args) {
-      calls.push(cmd);
+      calls.push({ cmd, args: cmd === "part_save" ? { file: args.file } : args });
       const file = (p) => fetch(`http://files.local${p}`);
       switch (cmd) {
         case "startup_project":
-          return snapshot.dir;
-        case "project_open":
-          return snapshot;
-        case "project_save":
           return null;
+        case "plugin:dialog|open":
+          return state.dir;
+        case "project_create":
+          state.meta = { ...state.meta, template: args.template, title: args.title || state.meta.title, language: args.language };
+          return snapshot();
+        case "project_open":
+          return snapshot();
+        case "project_save":
+          if (args.meta) state.meta = { ...args.meta };
+          if (args.bib !== undefined) state.bib = args.bib;
+          return null;
+        case "part_save":
+          state.parts[indexOf(args.file)].content = args.content;
+          return null;
+        case "part_create":
+          state.parts.splice(args.index, 0, { file: uniqueFile(args.title), content: `# ${args.title}\n\n` });
+          return snapshot();
+        case "part_delete":
+          if (state.parts.length === 1) throw "A document needs at least one part";
+          state.parts.splice(indexOf(args.file), 1);
+          return snapshot();
+        case "parts_reorder":
+          state.parts = args.parts.map((f) => state.parts[indexOf(f)]);
+          return snapshot();
+        case "part_split": {
+          const at = indexOf(args.file);
+          const marker = `${"#".repeat(args.level)} `;
+          const chunks = [];
+          for (const line of state.parts[at].content.split("\n")) {
+            if (line.startsWith(marker) || chunks.length === 0) chunks.push([]);
+            chunks.at(-1).push(line);
+          }
+          if (chunks.length < 2) throw "Nothing to split";
+          const pieces = chunks.map((lines, i) => ({
+            file: i === 0 ? args.file : uniqueFile(lines[0].slice(marker.length)),
+            content: `${lines.join("\n").trim()}\n`,
+          }));
+          state.parts.splice(at, 1, ...pieces);
+          return snapshot();
+        }
+        case "parts_merge": {
+          const at = indexOf(args.files[0]);
+          const merged = args.files.map((f) => state.parts[indexOf(f)].content.trim()).join("\n\n");
+          state.parts = state.parts.filter((p) => !args.files.slice(1).includes(p.file));
+          state.parts[at] = { file: args.files[0], content: `${merged}\n` };
+          return snapshot();
+        }
         case "figure_list":
-          return snapshot.figures;
+          return state.figures;
         case "compile":
           await new Promise((r) => setTimeout(r, 300));
           return {
             ok: true,
             cancelled: false,
-            pdfPath: `${snapshot.dir}/.build/paper.pdf`,
+            pdfPath: `${state.dir}/.build/paper.pdf`,
             pandocMs: 180,
             texMs: 610,
             usedNetwork: false,
             needsRerun: false,
+            convertedParts: args.focus ? 1 : state.parts.length,
+            toc: state.toc,
             diagnostics: [
-              { severity: "warning", stage: "latex", message: "Citation `missing2020' on page 1 undefined", file: "paper.tex", line: 46, source: "Cite with \\citep{knuth1984, lamport1994} or in the text: \\citet{shannon1948} showed that" },
-              { severity: "warning", stage: "bibtex", message: "empty journal in shannon1948", file: null, line: null, source: null },
+              {
+                severity: "warning",
+                stage: "latex",
+                message: "Citation `missing2020' on page 5 undefined",
+                file: "paper.tex",
+                line: 46,
+                source: "Cite with \\citep{knuth1984, lamport1994} or in the text: \\citet{shannon1948} showed that",
+                part: null,
+              },
+              {
+                severity: "warning",
+                stage: "latex",
+                message: "Overfull \\hbox (14.2pt too wide) in paragraph",
+                file: "part-method.tex",
+                line: 3,
+                source: "Inline math works as usual, $H(X) \\ge 0$, and labeled display equations are numbered:",
+                part: "sections/method.md",
+              },
+              { severity: "warning", stage: "bibtex", message: "empty journal in shannon1948", file: null, line: null, source: null, part: null },
             ],
           };
         case "read_binary":
           return (await file(args.path)).arrayBuffer();
         case "read_tex":
-          return (await file(`${snapshot.dir}/.build/paper.tex`)).text();
+          return (await file(`${state.dir}/.build/paper.tex`)).text();
         default:
           return null;
       }
@@ -84,75 +173,193 @@ page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 await page.route("http://files.local/**", (route) =>
   route.fulfill({ path: decodeURIComponent(new URL(route.request().url()).pathname) }),
 );
-await page.addInitScript(stubTauri, snapshot);
+await page.addInitScript(stubTauri, fixture);
 
 const shot = (name) => page.screenshot({ path: join(outDir, `${name}.png`) });
+const settle = (ms = 300) => page.waitForTimeout(ms);
+// The sidebar's tab bar comes first, the editor's second.
+const editorTabs = () => page.getByRole("tablist").nth(1).getByRole("tab");
+const editorTab = () => page.getByRole("tablist").nth(1).getByRole("tab", { selected: true }).textContent();
+const lastFocus = () =>
+  page.evaluate(() => String(window.__pfCalls.filter((c) => c.cmd === "compile").at(-1)?.args.focus));
+const lastStructureCall = () =>
+  page.evaluate(() => {
+    const last = window.__pfCalls.filter((c) => /^part|^parts/.test(c.cmd) && c.cmd !== "part_save").at(-1);
+    return last && `${last.cmd} ${JSON.stringify(last.args)}`;
+  });
 
+// Welcome, then a new project through the template gallery.
 await page.goto("http://localhost:1420/");
+await page.getByRole("button", { name: /New paper/ }).waitFor();
+await settle(200);
+await shot("01-welcome");
+
+await page.getByRole("button", { name: /New paper/ }).click();
+await page.getByRole("dialog", { name: "New paper" }).waitFor();
+await page.getByRole("radio", { name: /Thesis \/ Report/ }).click();
+await page.getByPlaceholder("Untitled paper").fill("Measuring Information");
+await page.getByText("Start from sample").click();
+await settle(150);
+await shot("02-gallery-create");
+await page.getByRole("button", { name: "Continue…" }).click();
+
 await page.waitForSelector(".cm-content", { timeout: 15000 });
 await page.waitForSelector(".pf-page canvas", { timeout: 15000 });
-await page.waitForTimeout(800);
-await shot("01-workspace");
+await settle(800);
+await shot("03-workspace");
 
-// Type a citation: the autocomplete lists bib entries.
+// Document menu: the only way, with the status bar, to reach templates once a project is open.
+await page.getByRole("button", { name: "Document" }).click();
+await settle(150);
+await shot("04-document-menu");
+await page.getByRole("menuitem", { name: /Contents & lists/ }).click();
+await settle(700);
+await shot("05-paper-contents");
+await page.getByText("List of tables").click();
+await settle(400);
+
+// Structure: contents from the last compile, parts as cards.
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+await settle(300);
+await page.locator("li.group").nth(1).hover();
+await settle(200);
+await shot("06-structure");
+
+// A contents entry opens the PDF at its page and the Markdown at its heading.
+await page.getByRole("list", { name: "Table of contents" }).getByRole("button", { name: /Results/ }).click();
+await settle(900);
+await shot("07-toc-entry-click");
+console.log("contents click opened:", await page.locator(".cm-activeLine").first().textContent());
+
+// Merge everything into one part: three top-level headings in one file get the split hint.
+for (let i = 0; i < 2; i++) {
+  await page.locator("li.group").first().hover();
+  await page.locator("li.group").first().getByRole("button", { name: "Merge with next" }).click();
+  await settle(400);
+}
+await page.mouse.move(5, 890);
+await settle(300);
+await shot("08-split-hint");
+console.log("after merging, cards:", await page.locator("li.group").count(), "·", await lastStructureCall());
+await page.locator("li.group").first().getByRole("button", { name: "Split", exact: true }).click();
+await settle(600);
+console.log("after split, cards:", await page.locator("li.group").count(), "·", await lastStructureCall());
+
+// Add a chapter after the second one, with its title asked inline.
+await page.locator("li.group").nth(1).hover();
+await page.locator("li.group").nth(1).getByRole("button", { name: "Add chapter after" }).click();
+await page.getByPlaceholder("New chapter title").fill("Discussion");
+await settle(150);
+await shot("09-add-chapter");
+await page.keyboard.press("Enter");
+await settle(600);
+console.log("after add, cards:", await page.locator("li.group").count(), "active tab:", await editorTab());
+
+// Part switcher in the editor tab bar.
+await page.getByRole("button", { name: /^All chapters/ }).click();
+await settle(150);
+await shot("10-part-switcher");
+await page.getByRole("menuitem", { name: /Introduction/ }).click();
+await settle(300);
+
+// Problems panel: a diagnostic from part-method.tex jumps into sections/method.md.
+await page.keyboard.press("ControlOrMeta+j");
+await settle(200);
+await page.getByText("Overfull").click();
+await settle(500);
+await shot("11-problems-jump");
+console.log("problem jumped to:", await editorTab(), "/", await page.locator(".cm-activeLine").first().textContent());
+await page.getByText("Citation `missing2020'").click();
+await settle(400);
+console.log("citation problem jumped to:", await editorTab());
+
+// Typing: citation autocomplete (labels from every part) and slash commands.
 await page.click(".cm-content");
 await page.keyboard.press("ControlOrMeta+End");
-await page.keyboard.type("\n\nAs shown by @sha");
+await page.keyboard.type("\n\nAs shown in @tbl");
 await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
-await shot("02-cite-autocomplete");
+await shot("12-cite-autocomplete-other-part");
+await page.keyboard.press("Escape");
+await page.keyboard.type("\n\n/to");
+await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
+await shot("13-slash-toc");
 await page.keyboard.press("Escape");
 
-// Slash commands.
-await page.keyboard.type("\n\n/ta");
-await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
-await shot("03-slash-commands");
-await page.keyboard.press("Enter");
-await page.waitForTimeout(200);
-
-// Hover inline math for the KaTeX preview.
-const math = page.locator(".pf-math").first();
-await math.hover();
+// KaTeX hover, in the method chapter.
+await page.locator("li.group").nth(1).click();
+await settle(300);
+await page.locator(".pf-math").first().hover();
 await page.waitForSelector(".pf-math-tooltip .katex", { timeout: 5000 });
-await shot("04-math-hover");
+await shot("14-math-hover");
 
-// Problems panel and a jump from a diagnostic to its Markdown line.
-await page.keyboard.press("ControlOrMeta+j");
-await page.waitForTimeout(200);
-await page.getByText("Citation `missing2020'").click();
-await page.waitForTimeout(400);
-await shot("05-problems");
-
-// Sidebar tabs.
 await page.getByRole("tab", { name: "Refs", exact: true }).click();
-await page.waitForTimeout(200);
-await shot("06-references");
-await page.getByRole("tab", { name: "Outline", exact: true }).click();
-await page.waitForTimeout(200);
+await settle(200);
+await shot("15-references");
 await page.getByRole("tab", { name: "Figures", exact: true }).click();
-await page.waitForTimeout(500);
-await shot("07-figures");
+await settle(500);
 
-// Double-click a word in the PDF: the editor jumps to that sentence.
-await page.getByRole("tab", { name: "Paper", exact: true }).click();
+// Double-click a word in the PDF: the editor opens the part with that sentence.
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+await page.locator(".pf-page").first().scrollIntoViewIfNeeded();
 const span = page.locator(".textLayer span", { hasText: "measured" }).first();
+await span.scrollIntoViewIfNeeded();
 await span.dblclick();
-await page.waitForTimeout(500);
-const activeLine = await page.locator(".cm-activeLine").first().textContent();
-console.log("PDF double-click jumped to line:", activeLine);
+await settle(500);
+console.log("PDF double-click opened:", await editorTab(), "/", await page.locator(".cm-activeLine").first().textContent());
 
-// Dark theme.
+// "Current chapter only": preview compiles get the active part as `focus` and follow it.
+await page.getByRole("button", { name: "Current chapter only" }).click();
+await settle(700);
+const focusBefore = await lastFocus();
+await page.locator("li.group").nth(1).click();
+await settle(700);
+console.log("chapter-only focus:", focusBefore, "→ after opening chapter 2:", await lastFocus());
+await page.getByRole("button", { name: "Current chapter only" }).click();
+await settle(700);
+console.log("chapter-only off, focus:", await lastFocus());
+
+// Template change from the status bar: the gallery in change mode.
+await page.locator("footer").getByRole("button", { name: "Thesis / Report" }).click();
+await page.getByRole("dialog", { name: "Change template" }).waitFor();
+await settle(150);
+await shot("16-gallery-change");
+await page.keyboard.press("Escape");
+await settle(150);
+
+// Dark theme, and the generated LaTeX.
 await page.getByRole("button", { name: "Dark theme" }).click();
-await page.waitForTimeout(400);
-await shot("08-dark");
+await settle(400);
+await shot("17-dark-structure");
+await page.getByRole("button", { name: "Document" }).click();
+await settle(150);
+await shot("18-dark-document-menu");
+await page.keyboard.press("Escape");
+await page.getByRole("tab", { name: "LaTeX (generated)" }).click();
+await settle(400);
+await shot("19-generated-tex");
 
-// Generated LaTeX tab.
-await page.getByRole("tab", { name: "paper.tex (generated)" }).click();
-await page.waitForTimeout(400);
-await shot("09-generated-tex");
+// Narrow window: the toolbar must not clip.
+await page.setViewportSize({ width: 1100, height: 760 });
+await editorTabs().first().click();
+await settle(500);
+await shot("20-narrow-1100-dark");
+await page.getByRole("button", { name: "Light theme" }).click();
+await page.getByRole("tab", { name: "Paper", exact: true }).click();
+await settle(400);
+await shot("21-narrow-1100-light-paper");
+const overflow = await page.evaluate(() => {
+  const header = document.querySelector("header");
+  return [...header.querySelectorAll("button")]
+    .filter((b) => b.getBoundingClientRect().right > header.getBoundingClientRect().right + 0.5)
+    .map((b) => b.getAttribute("aria-label") ?? b.textContent);
+});
+console.log("toolbar buttons clipped at 1100px:", overflow.length ? overflow : "none");
+await page.setViewportSize({ width: 1440, height: 900 });
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
-// on the sample and on a document 20x longer.
-await page.getByRole("tab", { name: "paper.md" }).click();
+// on one part and on a part 20x longer.
+await editorTabs().first().click();
+await settle(300);
 async function typingCost(repeat) {
   return page.evaluate(async (repeat) => {
     // The same pre-bundled module instance the app loaded, so findFromDOM sees its views.
@@ -182,10 +389,12 @@ async function typingCost(repeat) {
     return { lines, p50: sync[150].toFixed(2), p95: sync[285].toFixed(2), max: sync[299].toFixed(2), longTasks };
   }, repeat);
 }
-console.log("typing, sample  (ms/keystroke):", JSON.stringify(await typingCost(1)));
-console.log("typing, 20x doc (ms/keystroke):", JSON.stringify(await typingCost(20)));
+console.log("typing, one part (ms/keystroke):", JSON.stringify(await typingCost(1)));
+console.log("typing, 20x part (ms/keystroke):", JSON.stringify(await typingCost(20)));
+await settle(800);
 
 const calls = await page.evaluate(() => window.__pfCalls);
-console.log("IPC calls:", [...new Set(calls)].join(", "));
+console.log("IPC calls:", [...new Set(calls.map((c) => c.cmd))].join(", "));
+console.log("compile focus values:", [...new Set(calls.filter((c) => c.cmd === "compile").map((c) => String(c.args.focus)))].join(", "));
 console.log(errors.length ? `Page errors:\n${errors.join("\n")}` : "No page errors");
 await browser.close();

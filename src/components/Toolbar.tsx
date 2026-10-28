@@ -5,11 +5,14 @@ import {
   Code,
   FileArchive,
   FileDown,
+  FilePlus,
   FolderOpen,
   Heading1,
   Heading2,
   Image,
+  Images,
   Italic,
+  LayoutTemplate,
   Link,
   List,
   ListOrdered,
@@ -19,22 +22,27 @@ import {
   PanelLeft,
   Play,
   Quote,
+  Scissors,
+  Settings2,
   Sigma,
   SquareFunction,
   Sun,
   Superscript,
   Table,
+  Table2,
+  TableOfContents,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { exportLatex, exportPdf, revealProject } from "@/actions";
 import { formatting } from "@/editor/commands";
 import { withEditor } from "@/editor/bridge";
 import { baseName } from "@/lib/api";
-import { TEMPLATES } from "@/lib/templates";
-import { closeProject, compileNow, updateMeta } from "@/session";
-import { setTheme, store, useStore } from "@/store";
+import { splitLevel } from "@/lib/parts";
+import { templateInfo, unitName } from "@/lib/templates";
+import { closeProject, compileNow, splitPart } from "@/session";
+import { askNewPart, isPartFile, openGallery, setTheme, showContentsSettings, store, useStore } from "@/store";
 import { notify } from "./Toaster";
-import { Button, IconButton, MOD, Menu, SHIFT, Select } from "./ui";
+import { Button, IconButton, MENU_SEPARATOR, MOD, Menu, SHIFT, type MenuItem } from "./ui";
 
 type Action = keyof typeof formatting;
 
@@ -68,13 +76,74 @@ function run(task: () => Promise<unknown>) {
   task().catch((e) => notify(String(e), "error"));
 }
 
+function splitActivePart() {
+  const { parts, activeFile } = store.get();
+  const part = parts.find((p) => p.file === activeFile);
+  const level = part ? splitLevel(part) : null;
+  if (!part || level === null) {
+    const unit = unitName(store.get().meta?.template);
+    notify(`Nothing to split: this ${unit} needs at least two # or ## headings.`, "error");
+    return;
+  }
+  run(() => splitPart(part.file, level));
+}
+
+function addPartAfterActive() {
+  const { parts, activeFile } = store.get();
+  const index = parts.findIndex((p) => p.file === activeFile);
+  askNewPart(index < 0 ? parts.length : index + 1);
+}
+
+function documentMenu(template: Parameters<typeof templateInfo>[0], editingMarkdown: boolean): (MenuItem | typeof MENU_SEPARATOR)[] {
+  const unit = unitName(template);
+  return [
+    {
+      label: "Change template…",
+      icon: <LayoutTemplate size={14} />,
+      hint: templateInfo(template).label,
+      onSelect: () => openGallery("change"),
+    },
+    { label: "Contents & lists…", icon: <Settings2 size={14} />, onSelect: showContentsSettings },
+    MENU_SEPARATOR,
+    {
+      label: "Insert table of contents",
+      icon: <TableOfContents size={14} />,
+      disabled: !editingMarkdown,
+      onSelect: () => withEditor(formatting.toc),
+    },
+    {
+      label: "Insert list of figures",
+      icon: <Images size={14} />,
+      disabled: !editingMarkdown,
+      onSelect: () => withEditor(formatting.lof),
+    },
+    {
+      label: "Insert list of tables",
+      icon: <Table2 size={14} />,
+      disabled: !editingMarkdown,
+      onSelect: () => withEditor(formatting.lot),
+    },
+    MENU_SEPARATOR,
+    {
+      label: `Split current ${unit}`,
+      icon: <Scissors size={14} />,
+      hint: "at its headings",
+      disabled: !editingMarkdown,
+      onSelect: splitActivePart,
+    },
+    { label: `Add ${unit}`, icon: <FilePlus size={14} />, hint: "after this one", onSelect: addPartAfterActive },
+  ];
+}
+
 export function Toolbar() {
   const dir = useStore((s) => s.dir);
   const meta = useStore((s) => s.meta);
   const theme = useStore((s) => s.theme);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const compiling = useStore((s) => s.compile.state === "running");
-  const editingMarkdown = useStore((s) => s.activeFile === "paper.md");
+  const editingMarkdown = useStore((s) => isPartFile(s.activeFile));
+  const chapters = unitName(meta?.template) === "chapter";
+  const headingLabels: Partial<Record<Action, string>> = chapters ? { h1: "Chapter", h2: "Section" } : {};
 
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-panel px-2">
@@ -86,21 +155,21 @@ export function Toolbar() {
       >
         <PanelLeft size={16} />
       </IconButton>
-      <div className="min-w-0 max-w-56 px-1">
+      <div className="min-w-0 max-w-56 shrink px-1">
         <div className="truncate text-[13px] font-semibold text-fg">{meta?.title || "Untitled"}</div>
         <div className="truncate text-[11px] text-faint">{dir ? baseName(dir) : ""}</div>
       </div>
 
-      <div className="mx-1 h-5 w-px bg-line" />
+      <div className="mx-1 h-5 w-px shrink-0 bg-line" />
       <div className="flex min-w-0 items-center gap-0.5 overflow-hidden">
         {GROUPS.map((group, i) => (
           // Lists collapse first on narrow windows; they are one keystroke away anyway.
-          <div key={i} className={i === 2 ? "hidden items-center gap-0.5 xl:flex" : "flex items-center gap-0.5"}>
+          <div key={i} className={i === 2 ? "hidden items-center gap-0.5 xl:flex" : "flex shrink-0 items-center gap-0.5"}>
             {i > 0 && <div className="mx-1 h-4 w-px bg-line" />}
             {group.map((b) => (
               <IconButton
                 key={b.action}
-                label={b.label}
+                label={headingLabels[b.action] ?? b.label}
                 shortcut={b.shortcut}
                 disabled={!editingMarkdown}
                 onClick={() => withEditor(formatting[b.action])}
@@ -114,26 +183,29 @@ export function Toolbar() {
 
       <div className="flex-1" />
       {meta && (
-        <Select
-          aria-label="Template"
-          className="w-40 shrink-0"
-          value={meta.template}
-          onChange={(e) => updateMeta({ template: e.target.value as typeof meta.template })}
-        >
-          {TEMPLATES.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.label}
-            </option>
-          ))}
-        </Select>
+        <Menu
+          className="shrink-0"
+          trigger={
+            <Button variant="ghost" aria-haspopup="menu">
+              <TableOfContents size={14} /> Document <ChevronDown size={13} className="text-faint" />
+            </Button>
+          }
+          items={documentMenu(meta.template, editingMarkdown)}
+        />
       )}
-      <Button variant="primary" onClick={() => run(() => compileNow("full"))} title={`Save and typeset (${MOD}S)`}>
+      <Button
+        variant="primary"
+        className="shrink-0"
+        onClick={() => run(() => compileNow("full"))}
+        title={`Save and typeset (${MOD}S)`}
+      >
         {compiling ? <LoaderCircle size={14} className="animate-spin" /> : <Play size={14} />}
         Typeset
       </Button>
       <Menu
+        className="shrink-0"
         trigger={
-          <Button>
+          <Button aria-haspopup="menu">
             <FileDown size={14} /> Export <ChevronDown size={13} className="text-faint" />
           </Button>
         }
@@ -143,10 +215,14 @@ export function Toolbar() {
           { label: "Show project folder", icon: <FolderOpen size={14} />, onSelect: () => run(revealProject) },
         ]}
       />
-      <IconButton label={theme === "dark" ? "Light theme" : "Dark theme"} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+      <IconButton
+        className="shrink-0"
+        label={theme === "dark" ? "Light theme" : "Dark theme"}
+        onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+      >
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </IconButton>
-      <IconButton label="Close project" onClick={() => run(closeProject)}>
+      <IconButton className="shrink-0" label="Close project" onClick={() => run(closeProject)}>
         <LogOut size={15} />
       </IconButton>
     </header>

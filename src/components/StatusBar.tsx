@@ -1,8 +1,8 @@
 import { CircleAlert, CircleCheck, Cloud, LoaderCircle, TriangleAlert } from "lucide-react";
 import { useDeferredValue, useMemo } from "react";
-import { wordCount } from "@/lib/outline";
-import { LANGUAGES, templateInfo } from "@/lib/templates";
-import { store, useStore } from "@/store";
+import { partInfo, totalWords } from "@/lib/parts";
+import { LANGUAGES, templateInfo, unitName } from "@/lib/templates";
+import { openGallery, store, useStore } from "@/store";
 
 export function StatusBar() {
   const compile = useStore((s) => s.compile);
@@ -11,13 +11,15 @@ export function StatusBar() {
   const meta = useStore((s) => s.meta);
   const saveState = useStore((s) => s.saveState);
   const saveError = useStore((s) => s.saveError);
-  const body = useDeferredValue(useStore((s) => s.body));
-  const words = useMemo(() => wordCount(body), [body]);
+  const parts = useDeferredValue(useStore((s) => s.parts));
+  const activeFile = useStore((s) => s.activeFile);
+  const words = useMemo(() => totalWords(parts), [parts]);
+  const active = parts.find((p) => p.file === activeFile);
   const errors = diagnostics.filter((d) => d.severity === "error").length;
   const warnings = diagnostics.length - errors;
 
   return (
-    <footer className="flex h-6 shrink-0 items-center gap-4 border-t border-line bg-panel px-3 text-[11px] text-muted">
+    <footer className="flex h-6 shrink-0 items-center gap-4 overflow-hidden whitespace-nowrap border-t border-line bg-panel px-3 text-[11px] text-muted">
       <span className="flex items-center gap-1.5">
         {compile.state === "running" ? (
           <>
@@ -57,11 +59,27 @@ export function StatusBar() {
         {saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : "Saving…"}
       </span>
       <div className="flex-1" />
-      <span>{words.toLocaleString()} words</span>
+      <span title="Words in the whole document, and in the file being edited">
+        {words.toLocaleString()} words
+        {active && parts.length > 1 && (
+          <span className="text-faint">
+            {" "}
+            · {partInfo(active).words.toLocaleString()} in this {unitName(meta?.template)}
+          </span>
+        )}
+      </span>
       <span className="tabular-nums">
         Ln {cursor.line}, Col {cursor.col}
       </span>
-      {meta && <span>{templateInfo(meta.template).label}</span>}
+      {meta && (
+        <button
+          className="rounded px-1 hover:bg-raised hover:text-fg cursor-default"
+          title="Change template"
+          onClick={() => openGallery("change")}
+        >
+          {templateInfo(meta.template).label}
+        </button>
+      )}
       {meta && <span>{LANGUAGES.find((l) => l.id === meta.language)?.label ?? meta.language}</span>}
     </footer>
   );

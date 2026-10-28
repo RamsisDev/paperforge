@@ -1,0 +1,40 @@
+\documentclass[12pt,a4paper,oneside]{report}
+\usepackage{fontspec}
+\usepackage{amssymb}
+$common()$
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+\let\pfbibsection\bibsection
+\renewcommand\bibsection{\pfbibsection\phantomsection\addcontentsline{toc}{chapter}{\bibname}}
+
+\title{$title$}
+\author{$for(author)$$author.name$$if(author.affiliation)$\\{\small $author.affiliation$}$endif$$if(author.email)$\\{\small\texttt{$author.email$}}$endif$$sep$ \and $endfor$}
+\date{$date$}
+$if(includeonly)$
+\includeonly{$includeonly$}
+$endif$
+
+\begin{document}
+\maketitle
+$if(abstract)$
+\begin{abstract}
+$abstract$
+$if(keywords)$
+
+\medskip\noindent\textbf{$keywords-label$:} $for(keywords)$$keywords$$sep$, $endfor$
+$endif$
+\end{abstract}
+$elseif(keywords)$
+\noindent\textbf{$keywords-label$:} $for(keywords)$$keywords$$sep$, $endfor$
+$endif$
+$contents()$
+\clearpage
+
+$body$
+
+$if(bibliography)$
+\bibliographystyle{$if(biblio-style)$$biblio-style$$else$plainnat$endif$}
+\bibliography{$for(bibliography)$$bibliography$$sep$,$endfor$}
+$endif$
+\end{document}

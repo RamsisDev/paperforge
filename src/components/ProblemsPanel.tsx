@@ -1,5 +1,6 @@
 import { CircleAlert, TriangleAlert, X } from "lucide-react";
 import { useMemo } from "react";
+import { baseName } from "@/lib/api";
 import { locate } from "@/lib/diagnostics";
 import { jumpTo, store, useStore } from "@/store";
 import { IconButton, cx } from "./ui";
@@ -7,7 +8,7 @@ import { IconButton, cx } from "./ui";
 export function ProblemsPanel() {
   const diagnostics = useStore((s) => s.diagnostics);
   const located = useMemo(() => {
-    const items = locate(diagnostics, store.get().body);
+    const items = locate(diagnostics, store.get().parts);
     return items.sort((a, b) => (a.diagnostic.severity === b.diagnostic.severity ? 0 : a.diagnostic.severity === "error" ? -1 : 1));
   }, [diagnostics]);
 
@@ -35,10 +36,12 @@ export function ProblemsPanel() {
               ) : (
                 <TriangleAlert size={14} className="mt-0.5 shrink-0 text-warn" />
               )}
-              <span className={cx("flex-1 text-[12px]", d.severity === "error" ? "text-fg" : "text-muted")}>{d.message}</span>
-              <span className="shrink-0 font-mono text-[11px] text-faint">
+              <span className={cx("min-w-0 flex-1 break-words text-[12px]", d.severity === "error" ? "text-fg" : "text-muted")}>
+                {d.message}
+              </span>
+              <span className="shrink-0 font-mono text-[11px] text-faint" title={file ?? undefined}>
                 {d.stage}
-                {file && line !== null ? ` · ${file}:${line + 1}` : ""}
+                {file && line !== null ? ` · ${baseName(file)}:${line + 1}` : ""}
               </span>
             </button>
           </li>

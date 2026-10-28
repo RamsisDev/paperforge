@@ -89,6 +89,9 @@ export const SNIPPETS = {
   quote: "> ${Quote}",
   section: "# ${Section} {#sec:${label}}",
   pageBreak: "\\newpage",
+  toc: "\\tableofcontents",
+  lof: "\\listoffigures",
+  lot: "\\listoftables",
 };
 
 export const formatting = {
@@ -111,4 +114,7 @@ export const formatting = {
   table: (v: EditorView) => insertBlock(v, SNIPPETS.table),
   equation: (v: EditorView) => insertBlock(v, SNIPPETS.equation),
   codeBlock: (v: EditorView) => insertBlock(v, SNIPPETS.code),
+  toc: (v: EditorView) => insertBlock(v, SNIPPETS.toc),
+  lof: (v: EditorView) => insertBlock(v, SNIPPETS.lof),
+  lot: (v: EditorView) => insertBlock(v, SNIPPETS.lot),
 };

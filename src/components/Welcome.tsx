@@ -1,8 +1,9 @@
-import { FilePlus, FlaskConical, FolderOpen, X } from "lucide-react";
+import { FilePlus, FolderOpen, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { newProjectDialog, openProjectAt, openProjectDialog } from "@/actions";
+import { openProjectAt, openProjectDialog } from "@/actions";
 import { forgetProject, recentProjects } from "@/lib/recent";
 import { TEMPLATES } from "@/lib/templates";
+import { openGallery } from "@/store";
 import { notify } from "./Toaster";
 import { MOD } from "./ui";
 
@@ -47,14 +48,8 @@ export function Welcome() {
           <Action
             icon={<FilePlus size={18} />}
             title="New paper"
-            detail="Start from a blank paper in a folder you choose"
-            onClick={() => run(() => newProjectDialog(false))}
-          />
-          <Action
-            icon={<FlaskConical size={18} />}
-            title="New from sample"
-            detail="A short paper that shows citations, equations, figures and tables"
-            onClick={() => run(() => newProjectDialog(true))}
+            detail="Pick a template, blank or from a sample, in a folder you choose"
+            onClick={() => openGallery("create")}
           />
           <Action
             icon={<FolderOpen size={18} />}

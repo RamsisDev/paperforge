@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect } from "react";
 import { openProjectAt } from "@/actions";
+import { TemplateGallery } from "@/components/TemplateGallery";
 import { Toaster } from "@/components/Toaster";
 import { api } from "@/lib/api";
 import { Welcome } from "@/components/Welcome";
@@ -13,6 +14,7 @@ const Workspace = lazy(() => loadWorkspace().then((m) => ({ default: m.Workspace
 export default function App() {
   const dir = useStore((s) => s.dir);
   const theme = useStore((s) => s.theme);
+  const gallery = useStore((s) => s.gallery);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -46,6 +48,7 @@ export default function App() {
       ) : (
         <Welcome />
       )}
+      {gallery && (gallery === "create" || dir) && <TemplateGallery mode={gallery} />}
       <Toaster />
     </>
   );

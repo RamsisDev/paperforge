@@ -1,14 +1,17 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { FileCode, FileText, BookOpen } from "lucide-react";
-import { useEffect } from "react";
+import { BookOpen, ChevronsUpDown, FileCode, FilePlus, FileText } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import { useShallow } from "zustand/react/shallow";
 import { exportPdf, openProjectDialog } from "@/actions";
 import { insertBlock } from "@/editor/commands";
 import { editorBridge } from "@/editor/bridge";
-import { api } from "@/lib/api";
+import { api, baseName } from "@/lib/api";
 import { parseBib } from "@/lib/bib";
+import { partTitle } from "@/lib/parts";
+import { unitName } from "@/lib/templates";
 import { compileNow, refreshTex, setBib } from "@/session";
-import { store, useStore, type EditorFile } from "@/store";
+import { BIB_FILE, TEX_FILE, askNewPart, isPartFile, openFile, store, useStore, type EditorFile } from "@/store";
 import { Editor } from "./Editor";
 import { Preview } from "./Preview";
 import { ProblemsPanel } from "./ProblemsPanel";
@@ -17,7 +20,7 @@ import { StatusBar } from "./StatusBar";
 import { notify } from "./Toaster";
 import { Toolbar } from "./Toolbar";
 import { FIGURE_EXTENSIONS, figureSnippet, importFigures } from "./sidebar/FiguresPanel";
-import { Tabs } from "./ui";
+import { IconButton, MENU_SEPARATOR, Menu, Tabs } from "./ui";
 
 function Handle() {
   return (
@@ -27,24 +30,70 @@ function Handle() {
   );
 }
 
+/** Lists every part in reading order; the tab bar shows only the one being edited. */
+function PartSwitcher({ current }: { current: EditorFile }) {
+  const titles = useStore(useShallow((s) => s.parts.map(partTitle)));
+  const files = useStore(useShallow((s) => s.parts.map((p) => p.file)));
+  const unit = useStore((s) => unitName(s.meta?.template));
+  return (
+    <Menu
+      align="start"
+      className="shrink-0"
+      trigger={
+        <IconButton label={`All ${unit}s (${files.length})`} aria-haspopup="menu">
+          <ChevronsUpDown size={14} />
+        </IconButton>
+      }
+      items={[
+        ...files.map((file, i) => ({
+          key: file,
+          label: `${i + 1}. ${titles[i]}`,
+          hint: baseName(file),
+          active: file === current,
+          onSelect: () => openFile(file),
+        })),
+        MENU_SEPARATOR,
+        {
+          label: `Add ${unit}…`,
+          icon: <FilePlus size={14} />,
+          onSelect: () => askNewPart(Math.max(0, files.indexOf(current)) + 1),
+        },
+      ]}
+    />
+  );
+}
+
 function EditorPane() {
   const activeFile = useStore((s) => s.activeFile);
   const problemsOpen = useStore((s) => s.problemsOpen);
+  // The part tab keeps pointing at the last part edited while refs.bib or the LaTeX is shown.
+  const lastPart = useRef<EditorFile>("");
+  const files = useStore(useShallow((s) => s.parts.map((p) => p.file)));
+  if (isPartFile(activeFile)) lastPart.current = activeFile;
+  if (!files.includes(lastPart.current)) lastPart.current = files[0] ?? "";
+  const partFile = lastPart.current;
+  const partLabel = useStore((s) => {
+    const part = s.parts.find((p) => p.file === partFile);
+    return part ? partTitle(part) : "";
+  });
   return (
     <div className="flex h-full min-h-0 flex-col bg-panel">
-      <Tabs<EditorFile>
-        className="h-9 shrink-0 border-b border-line px-1.5"
-        value={activeFile}
-        onChange={(file) => {
-          if (file === "paper.tex") void refreshTex();
-          store.set({ activeFile: file });
-        }}
-        tabs={[
-          { id: "paper.md", label: "paper.md", icon: <FileText size={13} /> },
-          { id: "refs.bib", label: "refs.bib", icon: <BookOpen size={13} /> },
-          { id: "paper.tex", label: "paper.tex (generated)", icon: <FileCode size={13} /> },
-        ]}
-      />
+      <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-line px-1.5">
+        <PartSwitcher current={partFile} />
+        <Tabs<EditorFile>
+          className="min-w-0"
+          value={activeFile}
+          onChange={(file) => {
+            if (file === TEX_FILE) void refreshTex();
+            openFile(file);
+          }}
+          tabs={[
+            { id: partFile, label: partLabel, icon: <FileText size={13} />, truncate: true },
+            { id: BIB_FILE, label: BIB_FILE, icon: <BookOpen size={13} /> },
+            { id: TEX_FILE, label: "LaTeX (generated)", icon: <FileCode size={13} /> },
+          ]}
+        />
+      </div>
       <div className="min-h-0 flex-1">
         <Editor />
       </div>
@@ -73,7 +122,7 @@ function useFileDrop() {
         if (images.length) {
           const added = await importFigures(images);
           const view = editorBridge.view;
-          if (view && store.get().activeFile === "paper.md") {
+          if (view && isPartFile(store.get().activeFile)) {
             const ratio = window.devicePixelRatio || 1;
             const pos = view.posAtCoords({ x: position.x / ratio, y: position.y / ratio });
             if (pos !== null) view.dispatch({ selection: { anchor: pos } });
@@ -127,17 +176,17 @@ export function Workspace() {
       <Group orientation="horizontal" className="min-h-0 flex-1">
         {sidebarOpen && (
           <>
-            <Panel id="sidebar" defaultSize="21" minSize={240} maxSize="38">
+            <Panel id="sidebar" defaultSize="23" minSize={240} maxSize="38">
               <Sidebar />
             </Panel>
             <Handle />
           </>
         )}
-        <Panel id="editor" defaultSize="40" minSize="22">
+        <Panel id="editor" defaultSize="39" minSize="22">
           <EditorPane />
         </Panel>
         <Handle />
-        <Panel id="preview" defaultSize="39" minSize="20">
+        <Panel id="preview" defaultSize="38" minSize="20">
           <Preview />
         </Panel>
       </Group>

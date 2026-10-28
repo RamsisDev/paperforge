@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useEffect,
+  useId,
   useRef,
   useState,
   type ButtonHTMLAttributes,
@@ -149,13 +150,30 @@ export function Kbd({ children }: { children: ReactNode }) {
 
 export interface MenuItem {
   label: string;
+  /** Needed when two items share a label. */
+  key?: string;
   icon?: ReactNode;
   shortcut?: string;
+  /** Secondary text at the right, such as the current value. */
+  hint?: string;
+  active?: boolean;
   onSelect: () => void;
   disabled?: boolean;
 }
 
-export function Menu({ trigger, items, align = "end" }: { trigger: ReactNode; items: MenuItem[]; align?: "start" | "end" }) {
+export const MENU_SEPARATOR = "-";
+
+export function Menu({
+  trigger,
+  items,
+  align = "end",
+  className,
+}: {
+  trigger: ReactNode;
+  items: (MenuItem | typeof MENU_SEPARATOR)[];
+  align?: "start" | "end";
+  className?: string;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -171,34 +189,130 @@ export function Menu({ trigger, items, align = "end" }: { trigger: ReactNode; it
     };
   }, [open]);
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className={cx("relative", className)}>
       <div onClick={() => setOpen((o) => !o)}>{trigger}</div>
       {open && (
         <div
           role="menu"
           className={cx(
-            "absolute top-full z-50 mt-1 min-w-52 rounded-lg border border-line bg-panel p-1 shadow-xl",
+            "absolute top-full z-50 mt-1 max-h-[70vh] w-max min-w-52 max-w-80 overflow-auto rounded-lg border border-line bg-panel p-1 shadow-xl",
             align === "end" ? "right-0" : "left-0",
           )}
         >
-          {items.map((item) => (
-            <button
-              key={item.label}
-              role="menuitem"
-              disabled={item.disabled}
-              onClick={() => {
-                setOpen(false);
-                item.onSelect();
-              }}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-fg hover:bg-raised disabled:opacity-40 cursor-default"
-            >
-              <span className="text-muted">{item.icon}</span>
-              <span className="flex-1">{item.label}</span>
-              {item.shortcut && <Kbd>{item.shortcut}</Kbd>}
-            </button>
-          ))}
+          {items.map((item, i) =>
+            item === MENU_SEPARATOR ? (
+              <div key={`sep-${i}`} role="separator" className="mx-1 my-1 h-px bg-line" />
+            ) : (
+              <button
+                key={item.key ?? item.label}
+                role="menuitem"
+                disabled={item.disabled}
+                onClick={() => {
+                  setOpen(false);
+                  item.onSelect();
+                }}
+                className={cx(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-raised disabled:opacity-40 cursor-default",
+                  item.active ? "bg-accent-soft text-accent" : "text-fg",
+                )}
+              >
+                {item.icon && <span className="shrink-0 text-muted">{item.icon}</span>}
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {item.hint && <span className="shrink-0 text-[11px] text-faint">{item.hint}</span>}
+                {item.shortcut && <Kbd>{item.shortcut}</Kbd>}
+              </button>
+            ),
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+export function Checkbox({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: ReactNode;
+  hint?: ReactNode;
+}) {
+  return (
+    <label className="flex items-start gap-2 py-0.5 text-[13px] text-fg cursor-default">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--pf-accent)]"
+      />
+      <span>
+        {label}
+        {hint && <span className="block text-[11px] text-faint">{hint}</span>}
+      </span>
+    </label>
+  );
+}
+
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea, [tabindex]:not([tabindex="-1"])';
+
+/** Modal dialog: Esc and a click on the backdrop close it, Tab stays inside. */
+export function Dialog({
+  title,
+  onClose,
+  children,
+  className,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const first = ref.current?.querySelector<HTMLElement>("[data-autofocus]") ?? ref.current?.querySelector<HTMLElement>(FOCUSABLE);
+    first?.focus();
+    return () => previous?.focus?.();
+  }, []);
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onClose();
+    } else if (e.key === "Tab" && ref.current) {
+      const items = [...ref.current.querySelectorAll<HTMLElement>(FOCUSABLE)];
+      if (items.length === 0) return;
+      const at = items.indexOf(document.activeElement as HTMLElement);
+      if (e.shiftKey && at <= 0) {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (!e.shiftKey && at === items.length - 1) {
+        e.preventDefault();
+        items[0].focus();
+      }
+    }
+  }
+  return (
+    <div
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-6"
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onKeyDown={onKeyDown}
+        className={cx("flex max-h-full w-full flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-2xl", className)}
+      >
+        <h2 id={titleId} className="shrink-0 px-5 pt-4 text-[15px] font-semibold text-fg">
+          {title}
+        </h2>
+        {children}
+      </div>
     </div>
   );
 }
@@ -208,28 +322,34 @@ export function Tabs<T extends string>({
   onChange,
   tabs,
   className,
+  compact,
 }: {
   value: T;
   onChange: (v: T) => void;
-  tabs: { id: T; label: string; icon?: ReactNode; badge?: ReactNode }[];
+  /** `truncate`: the tab shrinks, ellipsizing its label, when the bar is short of room. */
+  tabs: { id: T; label: string; icon?: ReactNode; badge?: ReactNode; truncate?: boolean }[];
   className?: string;
+  /** In a narrow bar, inactive tabs show only their icon. */
+  compact?: boolean;
 }) {
   return (
-    <div role="tablist" className={cx("flex items-center gap-0.5", className)}>
+    <div role="tablist" className={cx("flex items-center gap-0.5", compact && "@container", className)}>
       {tabs.map((t) => (
         <button
           key={t.id}
           role="tab"
           aria-selected={value === t.id}
+          aria-label={t.label}
           onClick={() => onChange(t.id)}
           title={t.label}
           className={cx(
             "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors cursor-default",
+            t.truncate ? "min-w-0" : "shrink-0",
             value === t.id ? "bg-raised text-fg" : "text-muted hover:text-fg",
           )}
         >
-          {t.icon}
-          <span>{t.label}</span>
+          {t.icon && <span className="shrink-0">{t.icon}</span>}
+          <span className={cx("truncate", compact && value !== t.id && "@max-[19.25rem]:hidden")}>{t.label}</span>
           {t.badge}
         </button>
       ))}

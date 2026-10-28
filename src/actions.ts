@@ -1,7 +1,7 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { notify } from "@/components/Toaster";
-import { api, baseName, joinPath } from "@/lib/api";
+import { api, baseName, joinPath, type TemplateId } from "@/lib/api";
 import { compileNow, loadProject } from "@/session";
 import { store } from "@/store";
 
@@ -51,7 +51,7 @@ export async function exportLatex() {
 
 export async function revealProject() {
   const dir = store.get().dir;
-  if (dir) await revealItemInDir(joinPath(dir, "paper.md"));
+  if (dir) await revealItemInDir(joinPath(dir, "paper.json"));
 }
 
 export async function openProjectDialog() {
@@ -67,21 +67,30 @@ export async function openProjectAt(dir: string) {
   }
 }
 
-export async function newProjectDialog(sample: boolean) {
+export interface NewProject {
+  template: TemplateId;
+  title: string;
+  language: string;
+  sample: boolean;
+}
+
+/** Asks for a folder and creates the project there; resolves with whether a project was opened. */
+export async function createProjectDialog(project: NewProject): Promise<boolean> {
   const dir = await open({
     directory: true,
-    title: sample ? "Choose a folder for the sample paper" : "Choose an empty folder for the new paper",
+    title: project.sample ? "Choose a folder for the sample paper" : "Choose an empty folder for the new paper",
   });
-  if (typeof dir !== "string") return;
+  if (typeof dir !== "string") return false;
   try {
-    loadProject(await api.createProject(dir, sample));
+    loadProject(await api.createProject(dir, project.template, project.title, project.language, project.sample));
   } catch (e) {
     const message = String(e);
-    if (message.includes("already contains a project")) {
-      notify("That folder already has a paper; opening it.");
-      await openProjectAt(dir);
-    } else {
+    if (!message.includes("already contains a project")) {
       notify(message, "error");
+      return false;
     }
+    notify("That folder already has a paper; opening it.");
+    await openProjectAt(dir);
   }
+  return true;
 }

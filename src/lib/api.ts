@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type TemplateId = "article" | "ieee" | "acm" | "elsevier" | "lncs";
+export type TemplateId = "article" | "ieee" | "acm" | "elsevier" | "lncs" | "report" | "book";
 
 export interface Author {
   name: string;
@@ -17,12 +17,24 @@ export interface PaperMeta {
   language: string;
   date: string;
   bibStyle: string;
+  /** Ordered project-relative Markdown files, e.g. "sections/introduction.md". */
+  parts: string[];
+  toc: boolean;
+  lof: boolean;
+  lot: boolean;
+  /** 1..3 */
+  tocDepth: number;
+}
+
+export interface Part {
+  file: string;
+  content: string;
 }
 
 export interface ProjectSnapshot {
   dir: string;
   meta: PaperMeta;
-  body: string;
+  parts: Part[];
   bib: string;
   figures: string[];
 }
@@ -33,9 +45,25 @@ export interface Diagnostic {
   severity: Severity;
   stage: "pandoc" | "latex" | "bibtex";
   message: string;
+  /** Generated file: "paper.tex", "part-<x>.tex" or "refs.bib". */
   file: string | null;
+  /** 1-based line in `file`. */
   line: number | null;
+  /** Text of that generated line. */
   source: string | null;
+  /** The Markdown part the generated line came from. */
+  part: string | null;
+}
+
+export interface TocEntry {
+  list: "toc" | "lof" | "lot";
+  level: string;
+  depth: number;
+  /** "1.2", or "" for unnumbered entries. */
+  number: string;
+  title: string;
+  /** As LaTeX printed it: "3", "iv". */
+  page: string;
 }
 
 export interface CompileOutcome {
@@ -47,6 +75,8 @@ export interface CompileOutcome {
   texMs: number;
   usedNetwork: boolean;
   needsRerun: boolean;
+  toc: TocEntry[];
+  convertedParts: number;
 }
 
 export type CompileMode = "preview" | "full";
@@ -61,17 +91,24 @@ export interface EngineInfo {
 export const api = {
   engineInfo: () => invoke<EngineInfo>("engine_info"),
   startupProject: () => invoke<string | null>("startup_project"),
-  createProject: (dir: string, sample: boolean) =>
-    invoke<ProjectSnapshot>("project_create", { dir, sample }),
+  createProject: (dir: string, template: TemplateId, title: string, language: string, sample: boolean) =>
+    invoke<ProjectSnapshot>("project_create", { dir, template, title, language, sample }),
   openProject: (dir: string) => invoke<ProjectSnapshot>("project_open", { dir }),
-  save: (dir: string, parts: { meta?: PaperMeta; body?: string; bib?: string }) =>
-    invoke<void>("project_save", { dir, ...parts }),
+  save: (dir: string, fields: { meta?: PaperMeta; bib?: string }) => invoke<void>("project_save", { dir, ...fields }),
+  savePart: (dir: string, file: string, content: string) => invoke<void>("part_save", { dir, file, content }),
+  createPart: (dir: string, index: number, title: string) =>
+    invoke<ProjectSnapshot>("part_create", { dir, index, title }),
+  deletePart: (dir: string, file: string) => invoke<ProjectSnapshot>("part_delete", { dir, file }),
+  reorderParts: (dir: string, parts: string[]) => invoke<ProjectSnapshot>("parts_reorder", { dir, parts }),
+  splitPart: (dir: string, file: string, level: 1 | 2) => invoke<ProjectSnapshot>("part_split", { dir, file, level }),
+  mergeParts: (dir: string, files: string[]) => invoke<ProjectSnapshot>("parts_merge", { dir, files }),
   importFigure: (dir: string, source: string) => invoke<string>("figure_import", { dir, source }),
   listFigures: (dir: string) => invoke<string[]>("figure_list", { dir }),
   /** Raw bytes over IPC: no JSON number arrays for multi-megabyte PDFs. */
   readBinary: (path: string) => invoke<ArrayBuffer>("read_binary", { path }),
   readTex: (dir: string) => invoke<string>("read_tex", { dir }),
-  compile: (dir: string, mode: CompileMode) => invoke<CompileOutcome>("compile", { dir, mode }),
+  compile: (dir: string, mode: CompileMode, focus: string | null) =>
+    invoke<CompileOutcome>("compile", { dir, mode, focus }),
   exportPdf: (dir: string, dest: string) => invoke<void>("export_pdf", { dir, dest }),
   exportZip: (dir: string, dest: string) => invoke<void>("export_zip", { dir, dest }),
 };

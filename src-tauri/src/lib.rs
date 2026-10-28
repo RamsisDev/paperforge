@@ -99,10 +99,13 @@ fn startup_project() -> Option<String> {
 async fn project_create(
     state: State<'_, AppState>,
     dir: String,
+    template: String,
+    title: String,
+    language: String,
     sample: bool,
 ) -> Result<ProjectSnapshot, String> {
     let sample_dir = sample.then_some(state.sample_dir.as_path());
-    project::create(Path::new(&dir), sample_dir)
+    project::create(Path::new(&dir), sample_dir, &template, &title, &language)
 }
 
 #[tauri::command]
@@ -111,13 +114,38 @@ async fn project_open(dir: String) -> Result<ProjectSnapshot, String> {
 }
 
 #[tauri::command]
-async fn project_save(
-    dir: String,
-    meta: Option<PaperMeta>,
-    body: Option<String>,
-    bib: Option<String>,
-) -> Result<(), String> {
-    project::save(Path::new(&dir), meta.as_ref(), body.as_deref(), bib.as_deref())
+async fn project_save(dir: String, meta: Option<PaperMeta>, bib: Option<String>) -> Result<(), String> {
+    project::save(Path::new(&dir), meta.as_ref(), bib.as_deref())
+}
+
+#[tauri::command]
+async fn part_save(dir: String, file: String, content: String) -> Result<(), String> {
+    project::save_part(Path::new(&dir), &file, &content)
+}
+
+#[tauri::command]
+async fn part_create(dir: String, index: usize, title: String) -> Result<ProjectSnapshot, String> {
+    project::create_part(Path::new(&dir), index, &title)
+}
+
+#[tauri::command]
+async fn part_delete(dir: String, file: String) -> Result<ProjectSnapshot, String> {
+    project::delete_part(Path::new(&dir), &file)
+}
+
+#[tauri::command]
+async fn parts_reorder(dir: String, parts: Vec<String>) -> Result<ProjectSnapshot, String> {
+    project::reorder_parts(Path::new(&dir), &parts)
+}
+
+#[tauri::command]
+async fn part_split(dir: String, file: String, level: u8) -> Result<ProjectSnapshot, String> {
+    project::split_part(Path::new(&dir), &file, level)
+}
+
+#[tauri::command]
+async fn parts_merge(dir: String, files: Vec<String>) -> Result<ProjectSnapshot, String> {
+    project::merge_parts(Path::new(&dir), &files)
 }
 
 #[tauri::command]
@@ -137,8 +165,7 @@ async fn read_binary(path: String) -> Result<Response, String> {
 
 #[tauri::command]
 async fn read_tex(dir: String) -> Result<String, String> {
-    let path = project::build_dir(Path::new(&dir)).join("paper.tex");
-    tokio::fs::read_to_string(&path).await.map_err(|e| format!("{}: {e}", path.display()))
+    compiler::flatten_tex(&project::build_dir(Path::new(&dir))).await
 }
 
 #[tauri::command]
@@ -146,13 +173,14 @@ async fn compile(
     state: State<'_, AppState>,
     dir: String,
     mode: CompileMode,
+    focus: Option<String>,
 ) -> Result<CompileOutcome, String> {
     state.ensure_cache().await?;
     let toolchain = state.toolchain.clone();
     let lock = state.build_lock.clone();
     let task = tokio::spawn(async move {
         let _guard = lock.lock().await;
-        compiler::compile(&toolchain, Path::new(&dir), mode).await
+        compiler::compile(&toolchain, Path::new(&dir), mode, focus.as_deref()).await
     });
     if let Some(previous) = state.running.lock().unwrap().replace(task.abort_handle()) {
         previous.abort();
@@ -215,6 +243,12 @@ pub fn run() {
             project_create,
             project_open,
             project_save,
+            part_save,
+            part_create,
+            part_delete,
+            parts_reorder,
+            part_split,
+            parts_merge,
             figure_import,
             figure_list,
             read_binary,

@@ -37,7 +37,9 @@ import {
 import { tags as t } from "@lezer/highlight";
 import katex from "katex";
 import { parseBib, shortAuthors } from "@/lib/bib";
-import { labels } from "@/lib/outline";
+import type { Part } from "@/lib/api";
+import { labels, type Labels } from "@/lib/outline";
+import { allText } from "@/lib/parts";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
 
@@ -118,6 +120,15 @@ function bibEntries() {
   return bibCache.entries;
 }
 
+let labelCache: { parts: Part[]; labels: Labels } = { parts: [], labels: labels("") };
+
+/** Labels from every part: a reference may point into another file. */
+function documentLabels(): Labels {
+  const parts = store.get().parts;
+  if (parts !== labelCache.parts) labelCache = { parts, labels: labels(allText(parts)) };
+  return labelCache.labels;
+}
+
 function citationCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/@[\w:.-]*/);
   if (!word || (word.from === word.to && !context.explicit)) return null;
@@ -130,8 +141,7 @@ function citationCompletions(context: CompletionContext): CompletionResult | nul
     type: "text",
     boost: 1,
   }));
-  const found = labels(context.state.doc.toString());
-  for (const [kind, ids] of Object.entries(found)) {
+  for (const [kind, ids] of Object.entries(documentLabels())) {
     for (const id of ids) options.push({ label: `@${id}`, detail: REF_KINDS[kind], type: "variable" });
   }
   return { from: word.from, options, validFor: /^@[\w:.-]*$/ };
@@ -146,6 +156,9 @@ const SLASH_COMMANDS: { label: string; detail: string; template: string }[] = [
   { label: "/quote", detail: "Block quote", template: SNIPPETS.quote },
   { label: "/section", detail: "Section with a label", template: SNIPPETS.section },
   { label: "/pagebreak", detail: "Start a new page", template: SNIPPETS.pageBreak },
+  { label: "/toc", detail: "Table of contents here", template: SNIPPETS.toc },
+  { label: "/lof", detail: "List of figures here", template: SNIPPETS.lof },
+  { label: "/lot", detail: "List of tables here", template: SNIPPETS.lot },
 ];
 
 function slashCompletions(context: CompletionContext): CompletionResult | null {
