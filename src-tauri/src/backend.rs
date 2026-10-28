@@ -716,4 +716,62 @@ mod tests {
         };
         assert_eq!(opened["parts"][0]["content"], "# Hola");
     }
+
+    #[tokio::test]
+    async fn dispatch_round_trips_history() {
+        let backend = backend();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        let call = |command: &'static str, args: Value| {
+            let backend = &backend;
+            async move {
+                match backend.dispatch(command, args).await {
+                    Ok(Reply::Json(value)) => value,
+                    Ok(Reply::Bytes(_)) => panic!("{command}: expected JSON"),
+                    Err(e) => panic!("{command}: {e}"),
+                }
+            }
+        };
+        let created = call(
+            "project_create",
+            serde_json::json!({"dir": dir, "template": "article", "title": "T", "language": "en", "sample": false}),
+        )
+        .await;
+        let file = created["parts"][0]["file"].as_str().unwrap().to_string();
+        let status = call("history_status", serde_json::json!({"dir": dir})).await;
+        assert_eq!((status["enabled"].clone(), status["mode"].clone()), (Value::Bool(true), "own".into()));
+        assert_eq!(status["lastVersion"]["summary"], "Project created");
+
+        call("part_save", serde_json::json!({"dir": dir, "file": file, "content": "# Hola\n\nUno.\n"})).await;
+        let autosave = call("history_autosave", serde_json::json!({"dir": dir, "reason": null})).await;
+        assert_eq!(autosave["kind"], "autosave");
+        assert_eq!(autosave["summary"], "Edited: Hola");
+        let version = call(
+            "history_save_version",
+            serde_json::json!({"dir": dir, "label": "Draft", "note": null, "reason": null}),
+        )
+        .await;
+        assert_eq!((version["kind"].clone(), version["label"].clone()), ("version".into(), "Draft".into()));
+
+        call("part_save", serde_json::json!({"dir": dir, "file": file, "content": "# Hola\n\nDos.\n"})).await;
+        let list = call(
+            "history_list",
+            serde_json::json!({"dir": dir, "includeAutosaves": true, "before": null, "limit": 10}),
+        )
+        .await;
+        let summaries: Vec<&str> = list.as_array().unwrap().iter().map(|v| v["summary"].as_str().unwrap()).collect();
+        assert_eq!(summaries, ["Edited: Hola", "Edited: Hola", "Project created"]);
+        assert_eq!(list[0]["id"], version["id"]);
+
+        let restored = call("history_restore", serde_json::json!({"dir": dir, "id": version["id"]})).await;
+        assert_eq!(restored["parts"][0]["content"], "# Hola\n\nUno.\n");
+        let list = call(
+            "history_list",
+            serde_json::json!({"dir": dir, "includeAutosaves": true, "before": null, "limit": 2}),
+        )
+        .await;
+        assert_eq!(list[0]["kind"], "autosave");
+        assert!(list[0]["summary"].as_str().unwrap().starts_with("Before restoring the version of "));
+        assert_eq!(list[1]["id"], version["id"]);
+    }
 }
