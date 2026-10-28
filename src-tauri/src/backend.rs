@@ -279,6 +279,11 @@ impl Backend {
             name: String,
             data: String,
         }
+        #[derive(Deserialize)]
+        struct PreambleSave {
+            dir: String,
+            content: String,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -364,13 +369,22 @@ impl Backend {
                 let a: FigureImportBytes = parse(args)?;
                 json(project::import_figure_bytes(Path::new(&a.dir), &a.name, &a.data)?)
             }
+            "preamble_save" => {
+                let a: PreambleSave = parse(args)?;
+                json(project::save_preamble(Path::new(&a.dir), &a.content)?)
+            }
+            "template_eject" => {
+                let dir = parse::<Dir>(args)?.dir;
+                json(project::eject_template(Path::new(&dir), &self.toolchain.templates)?)
+            }
+            "template_restore" => json(project::restore_template(Path::new(&parse::<Dir>(args)?.dir))?),
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 23] = [
+pub const COMMANDS: [&str; 26] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -394,6 +408,9 @@ pub const COMMANDS: [&str; 23] = [
     "dictionary_read",
     "dictionary_add",
     "figure_import_bytes",
+    "preamble_save",
+    "template_eject",
+    "template_restore",
 ];
 
 #[cfg(test)]

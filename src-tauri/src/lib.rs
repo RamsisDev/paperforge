@@ -157,6 +157,21 @@ async fn figure_import_bytes(dir: String, name: String, data: String) -> Result<
     project::import_figure_bytes(Path::new(&dir), &name, &data)
 }
 
+#[tauri::command]
+async fn preamble_save(dir: String, content: String) -> Result<(), String> {
+    project::save_preamble(Path::new(&dir), &content)
+}
+
+#[tauri::command]
+async fn template_eject(state: State<'_, Backend>, dir: String) -> Result<ProjectSnapshot, String> {
+    project::eject_template(Path::new(&dir), &state.toolchain.templates)
+}
+
+#[tauri::command]
+async fn template_restore(dir: String) -> Result<ProjectSnapshot, String> {
+    project::restore_template(Path::new(&dir))
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -210,6 +225,9 @@ pub fn run() {
             dictionary_read,
             dictionary_add,
             figure_import_bytes,
+            preamble_save,
+            template_eject,
+            template_restore,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

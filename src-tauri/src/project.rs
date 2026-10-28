@@ -4,6 +4,8 @@
 //! paper.json   metadata, template choice and the ordered list of Markdown parts
 //! sections/    the parts (chapters or sections) in Pandoc Markdown
 //! refs.bib     BibTeX references
+//! preamble.tex optional LaTeX added to the end of the generated preamble
+//! template/    optional copy of the template ("Eject template"), used instead of the built-in one
 //! figures/     images referenced from the parts
 //! .build/      generated paper.tex, part-*.tex fragments, paper.pdf and logs (safe to delete)
 //! .paperforge/ project settings kept with the paper, e.g. dictionary.txt (one word per line)
@@ -16,7 +18,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compiler::{self, TEMPLATES, TEX_FILE};
+use crate::compiler::{self, TEMPLATE_PARTIALS, TEMPLATES, TEX_FILE};
 
 pub const META_FILE: &str = "paper.json";
 /// The single body file of projects created before documents had parts.
@@ -27,6 +29,8 @@ pub const FIGURES_DIR: &str = "figures";
 pub const BUILD_DIR: &str = ".build";
 pub const SETTINGS_DIR: &str = ".paperforge";
 pub const DICTIONARY_FILE: &str = "dictionary.txt";
+pub const PREAMBLE_FILE: &str = "preamble.tex";
+pub const TEMPLATE_DIR: &str = "template";
 
 const FIGURE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "pdf"];
 const SLUG_MAX_CHARS: usize = 48;
@@ -58,6 +62,10 @@ pub struct PaperMeta {
     pub lot: bool,
     /// Heading levels the printed table of contents shows, 1..=3.
     pub toc_depth: u8,
+    /// `\documentclass` options; each replaces the template's default of the same kind.
+    pub class_options: Vec<String>,
+    /// Project-relative copy of the template made by "Eject template"; empty for the built-in one.
+    pub template_file: String,
 }
 
 impl Default for PaperMeta {
@@ -76,6 +84,8 @@ impl Default for PaperMeta {
             lof: false,
             lot: false,
             toc_depth: 2,
+            class_options: Vec::new(),
+            template_file: String::new(),
         }
     }
 }
@@ -95,6 +105,8 @@ pub struct ProjectSnapshot {
     pub parts: Vec<Part>,
     pub bib: String,
     pub figures: Vec<String>,
+    /// `preamble.tex`, absent until the user creates it.
+    pub preamble: Option<String>,
 }
 
 pub fn read_meta(dir: &Path) -> Result<PaperMeta, String> {
@@ -211,6 +223,7 @@ fn snapshot(dir: &Path, meta: PaperMeta) -> Result<ProjectSnapshot, String> {
         parts,
         bib: read_optional(&dir.join(BIB_FILE))?,
         figures: list_figures(dir),
+        preamble: read_preamble(dir)?,
     })
 }
 
@@ -278,12 +291,14 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `parts` is owned by the part commands: a meta saved from a stale editor state must not drop
-/// or revive parts.
+/// `parts` and `template_file` are owned by the part and template commands: a meta saved from a
+/// stale editor state must not drop or revive them. Picking another template leaves the ejected
+/// copy, which belongs to the previous one.
 pub fn save(dir: &Path, meta: Option<&PaperMeta>, bib: Option<&str>) -> Result<(), String> {
     if let Some(meta) = meta {
-        let parts = read_meta(dir)?.parts;
-        write_meta(dir, &PaperMeta { parts, ..meta.clone() })?;
+        let stored = read_meta(dir)?;
+        let template_file = if stored.template == meta.template { stored.template_file } else { String::new() };
+        write_meta(dir, &PaperMeta { parts: stored.parts, template_file, ..meta.clone() })?;
     }
     if let Some(bib) = bib {
         write_atomic(&dir.join(BIB_FILE), bib.as_bytes())?;
@@ -604,20 +619,89 @@ pub fn export_zip(dir: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `.paperforge/dictionary.txt` of a project; a settings folder or file that is a link could
-/// point outside the project, so those are refused.
-fn dictionary_path(dir: &Path) -> Result<PathBuf, String> {
-    if !dir.join(META_FILE).is_file() {
-        return Err(format!("{} is not a PaperForge project (no {META_FILE})", dir.display()));
+fn require_project(dir: &Path) -> Result<(), String> {
+    if dir.join(META_FILE).is_file() {
+        Ok(())
+    } else {
+        Err(format!("{} is not a PaperForge project (no {META_FILE})", dir.display()))
     }
-    let settings = dir.join(SETTINGS_DIR);
-    let path = settings.join(DICTIONARY_FILE);
-    for p in [&settings, &path] {
-        if fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!("{} is a link out of the project", p.display()));
+}
+
+/// `rel` below `dir` with every component a plain name and none of them a link, which could
+/// point outside the project.
+fn inside_project(dir: &Path, rel: &str) -> Result<PathBuf, String> {
+    let path = Path::new(rel);
+    if rel.is_empty() || rel.contains('\\') || !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(format!("'{rel}' is not a path inside the project"));
+    }
+    let mut at = dir.to_path_buf();
+    for component in path.components() {
+        at.push(component);
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("{} is a link out of the project", at.display()));
         }
     }
+    Ok(at)
+}
+
+/// `.paperforge/dictionary.txt` of a project.
+fn dictionary_path(dir: &Path) -> Result<PathBuf, String> {
+    require_project(dir)?;
+    inside_project(dir, &format!("{SETTINGS_DIR}/{DICTIONARY_FILE}"))
+}
+
+/// A linked preamble (macros shared by several papers) is read, but never written through.
+pub fn read_preamble(dir: &Path) -> Result<Option<String>, String> {
+    let path = dir.join(PREAMBLE_FILE);
+    match fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+pub fn save_preamble(dir: &Path, content: &str) -> Result<(), String> {
+    require_project(dir)?;
+    write_atomic(&inside_project(dir, PREAMBLE_FILE)?, content.as_bytes())
+}
+
+/// The ejected template a meta points at, checked to be a `.tex` file inside the project.
+pub fn template_file_path(dir: &Path, file: &str) -> Result<PathBuf, String> {
+    let path = inside_project(dir, file)?;
+    if Path::new(file).extension().is_none_or(|e| e != "tex") || !path.is_file() {
+        return Err(format!("The project template '{file}' is missing; restore the built-in template"));
+    }
     Ok(path)
+}
+
+/// Copies the current built-in template and its partials into `template/`, and compiles with that
+/// copy from now on. Files already there (from an earlier eject) are kept, with their edits.
+pub fn eject_template(dir: &Path, templates: &Path) -> Result<ProjectSnapshot, String> {
+    let mut meta = read_meta(dir)?;
+    if !TEMPLATES.contains(&meta.template.as_str()) {
+        return Err(format!("Unknown template '{}'", meta.template));
+    }
+    let main = format!("{}.tex", meta.template);
+    let target = inside_project(dir, TEMPLATE_DIR)?;
+    fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    for name in std::iter::once(main.as_str()).chain(TEMPLATE_PARTIALS) {
+        let dest = inside_project(dir, &format!("{TEMPLATE_DIR}/{name}"))?;
+        if !dest.exists() {
+            let source = templates.join(name);
+            fs::copy(&source, &dest).map_err(|e| format!("{}: {e}", source.display()))?;
+        }
+    }
+    meta.template_file = format!("{TEMPLATE_DIR}/{main}");
+    write_meta(dir, &meta)?;
+    snapshot(dir, meta)
+}
+
+/// Compiles with the built-in template again; the ejected copy stays on disk.
+pub fn restore_template(dir: &Path) -> Result<ProjectSnapshot, String> {
+    let mut meta = read_meta(dir)?;
+    meta.template_file.clear();
+    write_meta(dir, &meta)?;
+    snapshot(dir, meta)
 }
 
 /// Non-empty trimmed lines, first occurrence only.
@@ -927,6 +1011,96 @@ mod tests {
         assert_eq!(meta.template, "article");
         assert_eq!(meta.toc_depth, 2);
         assert!(meta.parts.is_empty() && !meta.toc);
+        assert!(meta.class_options.is_empty() && meta.template_file.is_empty());
+    }
+
+    #[test]
+    fn meta_round_trips_class_options_and_template_file() {
+        let tmp = blank();
+        let mut meta = read_meta(tmp.path()).unwrap();
+        meta.class_options = vec!["twocolumn".into(), "10pt".into()];
+        meta.template_file = "template/article.tex".into();
+        write_meta(tmp.path(), &meta).unwrap();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(raw.contains("\"classOptions\"") && raw.contains("\"templateFile\""), "{raw}");
+        assert_eq!(read_meta(tmp.path()).unwrap(), meta);
+    }
+
+    fn built_in_templates() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/templates")
+    }
+
+    #[test]
+    fn save_keeps_the_ejected_template_until_the_template_changes() {
+        let tmp = blank();
+        eject_template(tmp.path(), &built_in_templates()).unwrap();
+        let stale = PaperMeta { title: "New".into(), ..PaperMeta::default() };
+        save(tmp.path(), Some(&stale), None).unwrap();
+        let meta = read_meta(tmp.path()).unwrap();
+        assert_eq!((meta.title.as_str(), meta.template_file.as_str()), ("New", "template/article.tex"));
+
+        let report = PaperMeta { template: "report".into(), template_file: "template/article.tex".into(), ..meta };
+        save(tmp.path(), Some(&report), None).unwrap();
+        assert_eq!(read_meta(tmp.path()).unwrap().template_file, "");
+    }
+
+    #[test]
+    fn eject_copies_the_template_and_keeps_earlier_edits() {
+        let tmp = blank();
+        let s = eject_template(tmp.path(), &built_in_templates()).unwrap();
+        assert_eq!(s.meta.template_file, "template/article.tex");
+        for name in ["article.tex", "common.tex", "contents.tex"] {
+            let copied = fs::read(tmp.path().join(TEMPLATE_DIR).join(name)).unwrap();
+            assert_eq!(copied, fs::read(built_in_templates().join(name)).unwrap(), "{name}");
+        }
+        assert!(!tmp.path().join(TEMPLATE_DIR).join("paper.lua").exists());
+        assert!(template_file_path(tmp.path(), &s.meta.template_file).is_ok());
+
+        let restored = restore_template(tmp.path()).unwrap();
+        assert_eq!(restored.meta.template_file, "");
+        let edited = tmp.path().join(TEMPLATE_DIR).join("article.tex");
+        fs::write(&edited, "% mine\n").unwrap();
+        eject_template(tmp.path(), &built_in_templates()).unwrap();
+        assert_eq!(fs::read_to_string(&edited).unwrap(), "% mine\n");
+    }
+
+    #[test]
+    fn template_file_must_be_a_tex_file_inside_the_project() {
+        let tmp = blank();
+        eject_template(tmp.path(), &built_in_templates()).unwrap();
+        fs::write(tmp.path().join("notes.txt"), "x").unwrap();
+        for bad in ["../article.tex", "/etc/article.tex", "template/../../x.tex", "template\\article.tex", "", "notes.txt"] {
+            assert!(template_file_path(tmp.path(), bad).is_err(), "{bad:?}");
+        }
+        assert!(template_file_path(tmp.path(), "template/missing.tex").unwrap_err().contains("restore"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_and_preamble_refuse_links_out_of_the_project() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("article.tex"), "x").unwrap();
+        fs::write(outside.path().join(PREAMBLE_FILE), "\\newcommand\\shared{S}\n").unwrap();
+
+        let tmp = blank();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join(TEMPLATE_DIR)).unwrap();
+        assert!(template_file_path(tmp.path(), "template/article.tex").is_err());
+        assert!(eject_template(tmp.path(), &built_in_templates()).is_err());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 2);
+
+        std::os::unix::fs::symlink(outside.path().join(PREAMBLE_FILE), tmp.path().join(PREAMBLE_FILE)).unwrap();
+        assert_eq!(read_preamble(tmp.path()).unwrap().as_deref(), Some("\\newcommand\\shared{S}\n"));
+        assert!(save_preamble(tmp.path(), "x").is_err());
+        assert_eq!(fs::read_to_string(outside.path().join(PREAMBLE_FILE)).unwrap(), "\\newcommand\\shared{S}\n");
+    }
+
+    #[test]
+    fn preamble_is_optional_and_saved_in_the_project() {
+        let tmp = blank();
+        assert_eq!(open(tmp.path()).unwrap().preamble, None);
+        save_preamble(tmp.path(), "\\usepackage{xspace}\n").unwrap();
+        assert_eq!(open(tmp.path()).unwrap().preamble.as_deref(), Some("\\usepackage{xspace}\n"));
+        assert!(save_preamble(tempfile::tempdir().unwrap().path(), "x").is_err());
     }
 
     fn words(list: &[&str]) -> Vec<String> {
