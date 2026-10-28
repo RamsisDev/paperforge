@@ -1,9 +1,11 @@
 import {
+  Asterisk,
   Bold,
   BookOpen,
   ChevronDown,
   Code,
   FileArchive,
+  FileDiff,
   FileDown,
   FilePlus,
   FolderOpen,
@@ -18,6 +20,8 @@ import {
   ListOrdered,
   LoaderCircle,
   LogOut,
+  MessageSquarePlus,
+  MessageSquareText,
   Moon,
   PanelLeft,
   Play,
@@ -33,16 +37,28 @@ import {
   TableOfContents,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { exportLatex, exportPdf, revealProject } from "@/actions";
+import { exportLatex, exportPdf, exportReviewPdf, revealProject } from "@/actions";
 import { formatting } from "@/editor/commands";
+import { toggleTrackChanges } from "@/editor/changes";
+import { addComment } from "@/editor/comments";
 import { withEditor } from "@/editor/bridge";
 import { baseName } from "@/lib/api";
 import { splitLevel } from "@/lib/parts";
 import { templateInfo, unitName } from "@/lib/templates";
-import { closeProject, compileNow, splitPart } from "@/session";
-import { askNewPart, isPartFile, openGallery, setTheme, showContentsSettings, store, useStore } from "@/store";
+import { closeProject, compileNow, setReviewMode, splitPart } from "@/session";
+import {
+  askNewPart,
+  isPartFile,
+  openGallery,
+  setEditorMode,
+  setTheme,
+  showContentsSettings,
+  store,
+  useStore,
+  type EditorMode,
+} from "@/store";
 import { notify } from "./Toaster";
-import { Button, IconButton, MENU_SEPARATOR, MOD, Menu, SHIFT, type MenuItem } from "./ui";
+import { Button, IconButton, MENU_SEPARATOR, MOD, Menu, SHIFT, cx, type MenuItem } from "./ui";
 
 type Action = keyof typeof formatting;
 
@@ -67,6 +83,7 @@ const GROUPS: { action: Action; label: string; icon: ReactNode; shortcut?: strin
     { action: "math", label: "Inline math", icon: <Sigma size={15} />, shortcut: `${MOD}M` },
     { action: "equation", label: "Numbered equation", icon: <SquareFunction size={15} />, shortcut: `${MOD}${SHIFT}M` },
     { action: "citation", label: "Citation", icon: <BookOpen size={15} />, shortcut: `${MOD}${SHIFT}C` },
+    { action: "footnote", label: "Footnote", icon: <Asterisk size={15} /> },
     { action: "figure", label: "Figure", icon: <Image size={15} /> },
     { action: "table", label: "Table", icon: <Table size={15} /> },
   ],
@@ -135,12 +152,43 @@ function documentMenu(template: Parameters<typeof templateInfo>[0], editingMarkd
   ];
 }
 
+const MODES: { mode: EditorMode; label: string; title: string }[] = [
+  { mode: "writing", label: "Writing", title: "Writing mode: math, figures and citations rendered in place" },
+  { mode: "source", label: "Source", title: "Source mode: the Markdown as typed" },
+];
+
+function ModeSwitch({ disabled }: { disabled: boolean }) {
+  const current = useStore((s) => s.editorMode);
+  return (
+    <div role="group" aria-label="Editor mode" className="flex shrink-0 items-center rounded-md bg-raised p-0.5">
+      {MODES.map(({ mode, label, title }) => (
+        <button
+          key={mode}
+          type="button"
+          aria-pressed={current === mode}
+          title={title}
+          disabled={disabled}
+          onClick={() => setEditorMode(mode)}
+          className={cx(
+            "h-6 rounded px-2 text-xs font-medium transition-colors cursor-default disabled:opacity-50",
+            current === mode ? "bg-panel text-fg shadow-sm" : "text-muted hover:text-fg",
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function Toolbar() {
   const dir = useStore((s) => s.dir);
   const meta = useStore((s) => s.meta);
   const theme = useStore((s) => s.theme);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const compiling = useStore((s) => s.compile.state === "running");
+  const reviewMode = useStore((s) => s.reviewMode);
+  const trackChanges = useStore((s) => s.trackChanges);
   const editingMarkdown = useStore((s) => isPartFile(s.activeFile));
   const chapters = unitName(meta?.template) === "chapter";
   const headingLabels: Partial<Record<Action, string>> = chapters ? { h1: "Chapter", h2: "Section" } : {};
@@ -179,9 +227,24 @@ export function Toolbar() {
             ))}
           </div>
         ))}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <div className="mx-1 h-4 w-px bg-line" />
+          <IconButton label="Add comment" shortcut={`${MOD}⌥C`} disabled={!editingMarkdown} onClick={() => withEditor(addComment)}>
+            <MessageSquarePlus size={15} />
+          </IconButton>
+          <IconButton
+            label="Track changes"
+            aria-pressed={trackChanges}
+            className={cx(trackChanges && "bg-accent-soft text-accent hover:bg-accent-soft hover:text-accent")}
+            onClick={() => toggleTrackChanges(!trackChanges)}
+          >
+            <FileDiff size={15} />
+          </IconButton>
+        </div>
       </div>
 
       <div className="flex-1" />
+      <ModeSwitch disabled={!editingMarkdown} />
       {meta && (
         <Menu
           className="shrink-0"
@@ -193,6 +256,16 @@ export function Toolbar() {
           items={documentMenu(meta.template, editingMarkdown)}
         />
       )}
+      <Button
+        variant="ghost"
+        className={cx("shrink-0", reviewMode && "bg-accent-soft text-accent hover:bg-accent-soft hover:text-accent")}
+        aria-pressed={reviewMode}
+        aria-label="Review"
+        onClick={() => setReviewMode(!reviewMode)}
+        title="Review: the preview and Typeset show comments with their notes and tracked changes. Export PDF stays final, with every change accepted."
+      >
+        <MessageSquareText size={14} /> <span className="hidden xl:inline">Review</span>
+      </Button>
       <Button
         variant="primary"
         className="shrink-0"
@@ -211,6 +284,7 @@ export function Toolbar() {
         }
         items={[
           { label: "PDF…", icon: <FileDown size={14} />, shortcut: `${MOD}${SHIFT}E`, onSelect: () => run(exportPdf) },
+          { label: "Review PDF…", icon: <MessageSquareText size={14} />, hint: "with comments and changes", onSelect: () => run(exportReviewPdf) },
           { label: "LaTeX sources (.zip)…", icon: <FileArchive size={14} />, onSelect: () => run(exportLatex) },
           { label: "Show project folder", icon: <FolderOpen size={14} />, onSelect: () => run(revealProject) },
         ]}

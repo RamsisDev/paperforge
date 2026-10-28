@@ -52,11 +52,28 @@ function stubTauri(fixture) {
     parts: state.parts.map((p) => ({ ...p })),
     bib: state.bib,
     figures: state.figures,
+    preamble: state.preamble ?? null,
   });
   const indexOf = (file) => {
     const i = state.parts.findIndex((p) => p.file === file);
     if (i < 0) throw `No part ${file}`;
     return i;
+  };
+  // Shaped like the backend's flattened view: part lines around each fragment, a `%PF:N` line
+  // and a blank line before each block, here with the Markdown standing in for its LaTeX.
+  const generatedTex = () => {
+    const out = ["\\begin{document}"];
+    for (const part of state.parts) {
+      out.push(`%PF-PART:${part.file}`);
+      const lines = part.content.replace(/\n+$/, "").split("\n");
+      lines.forEach((line, i) => {
+        if (line.trim() && (i === 0 || !lines[i - 1].trim())) out.push(`%PF:${i + 1}`, "");
+        out.push(line);
+      });
+      out.push("%PF-PART-END");
+    }
+    out.push("\\end{document}", "");
+    return out.join("\n");
   };
 
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
@@ -77,6 +94,8 @@ function stubTauri(fixture) {
           return null;
         case "plugin:dialog|open":
           return state.dir;
+        case "plugin:dialog|save":
+          return `/tmp/${args.options?.defaultPath ?? "export"}`;
         case "project_create":
           state.meta = { ...state.meta, template: args.template, title: args.title || state.meta.title, language: args.language };
           return snapshot();
@@ -124,6 +143,12 @@ function stubTauri(fixture) {
         }
         case "figure_list":
           return state.figures;
+        case "figure_import_bytes": {
+          // The bytes are not kept, so the path stays out of `figure_list` (no thumbnail to load).
+          const ext = args.name.split(".").pop().toLowerCase();
+          const stem = args.name.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+          return `figures/${stem || "figure"}.${ext}`;
+        }
         case "compile":
           await new Promise((r) => setTimeout(r, 300));
           return {
@@ -136,6 +161,13 @@ function stubTauri(fixture) {
             needsRerun: false,
             convertedParts: args.focus ? 1 : state.parts.length,
             toc: state.toc,
+            labels: {
+              "sec:intro": { number: "1", page: "3" },
+              "sec:method": { number: "2", page: "5" },
+              "eq:entropy": { number: "2.1", page: "5" },
+              "fig:example": { number: "2.1", page: "5" },
+              "tbl:results": { number: "2.1", page: "6" },
+            },
             diagnostics: [
               {
                 severity: "warning",
@@ -161,7 +193,50 @@ function stubTauri(fixture) {
         case "read_binary":
           return (await file(args.path)).arrayBuffer();
         case "read_tex":
+          if (window.__pfGeneratedTex) return generatedTex();
           return (await file(`${state.dir}/.build/paper.tex`)).text();
+        // The blank-line-separated block around the line, with a few Markdown → LaTeX rewrites.
+        case "block_latex": {
+          const lines = args.content.split("\n");
+          if (!lines[args.line - 1]?.trim()) return null;
+          let from = args.line;
+          let to = args.line;
+          while (from > 1 && lines[from - 2].trim()) from--;
+          while (to < lines.length && lines[to].trim()) to++;
+          const latex = lines
+            .slice(from - 1, to)
+            .map((l) => l.replace(/\*\*(.+?)\*\*/g, "\\textbf{$1}").replace(/\[@([\w:-]+)\]/g, "\\citep{$1}").replace(/@([\w:-]+)/g, "\\ref{$1}"))
+            .join("\n");
+          return { fromLine: 40, toLine: 40 + to - from, markdownFrom: from, markdownTo: to, latex, stale: false };
+        }
+        // No SyncTeX data unless a check sets an answer: the preview falls back to text matching.
+        case "synctex_to_source":
+          return window.__pfSynctexSource ?? null;
+        case "synctex_to_pdf":
+          return window.__pfSynctexPdf ?? null;
+        case "dictionary_read":
+          return state.dictionary ?? [];
+        case "dictionary_add":
+          state.dictionary = [...new Set([...(state.dictionary ?? []), ...args.words])];
+          return state.dictionary;
+        case "preamble_save":
+          state.preamble = args.content;
+          return null;
+        case "template_eject":
+          state.meta = { ...state.meta, templateFile: `template/${state.meta.template}.tex` };
+          return snapshot();
+        case "template_restore":
+          state.meta = { ...state.meta, templateFile: "" };
+          return snapshot();
+        case "bib_lookup":
+          if (!args.query.includes("10.")) throw `'${args.query}' is not a DOI (10.1234/…) or an arXiv id (2401.01234, hep-th/9901001).`;
+          return {
+            key: "vaswani2017attention",
+            bibtex:
+              "@article{vaswani2017attention,\n  title   = {Attention Is All You Need},\n" +
+              "  journal = {Advances in Neural Information Processing Systems},\n" +
+              "  author  = {Vaswani, Ashish and Shazeer, Noam},\n  year    = {2017}\n}\n",
+          };
         default:
           return null;
       }
@@ -193,7 +268,7 @@ const lastStructureCall = () =>
   });
 
 // Welcome, then a new project through the template gallery.
-await page.goto("http://localhost:1420/");
+await page.goto(process.env.PF_URL ?? "http://localhost:1420/");
 await page.getByRole("button", { name: /New paper/ }).waitFor();
 await settle(200);
 await shot("01-welcome");
@@ -256,6 +331,23 @@ await shot("06d-chapter-workspace");
 console.log("chapter card (text x relative to the title):", await cardOutline());
 console.log("chapter badges:", JSON.stringify(await badges()));
 
+// Outline folding: a gutter click folds one heading's section and keeps its chapter badge;
+// Mod-Alt-[ folds every top-level section, Mod-Alt-] unfolds them all.
+const foldedCount = () => page.locator(".cm-foldPlaceholder").count();
+const foldGutter = await page.locator(".pf-fold-gutter").boundingBox();
+const subtemaLine = await page.locator(".cm-line", { hasText: "Subtema" }).boundingBox();
+await page.mouse.click(foldGutter.x + foldGutter.width / 2, subtemaLine.y + 8);
+await settle(200);
+await page.screenshot({ path: join(outDir, "06e-folded-heading.png"), clip: { ...editorBox, height: 200 } });
+console.log("folded ranges after a gutter click:", await foldedCount(), "· badges", JSON.stringify(await badges()));
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+Alt+BracketLeft");
+await settle(200);
+const foldedAll = await foldedCount();
+await page.keyboard.press("ControlOrMeta+Alt+BracketRight");
+await settle(200);
+console.log("fold all:", foldedAll, "ranges · after unfold all:", await foldedCount());
+
 // A contents entry opens the PDF at its page and the Markdown at its heading.
 await page.getByRole("list", { name: "Table of contents" }).getByRole("button", { name: /Results/ }).click();
 await settle(900);
@@ -310,11 +402,40 @@ await page.keyboard.press("ControlOrMeta+End");
 await page.keyboard.type("\n\nAs shown in @tbl");
 await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
 await shot("12-cite-autocomplete-other-part");
+const completionRows = () =>
+  page
+    .locator(".cm-tooltip-autocomplete li")
+    .evaluateAll((rows) =>
+      rows.map((r) => `${r.querySelector(".cm-completionLabel")?.textContent} (${r.querySelector(".cm-completionDetail")?.textContent ?? ""})`),
+    );
+console.log("label completion:", JSON.stringify(await completionRows()));
 await page.keyboard.press("Escape");
+
+// Reference picker: `/ref` lists labels with their names and inserts the name with the reference.
+await page.keyboard.type(" and /refres");
+await page.locator(".cm-tooltip-autocomplete li", { hasText: "@tbl:results" }).waitFor({ timeout: 5000 });
+await shot("12b-reference-picker");
+console.log("reference picker:", JSON.stringify(await completionRows()));
+await page.keyboard.press("Enter");
+await settle(150);
+console.log("after picking a reference:", await page.locator(".cm-activeLine").first().textContent());
+await page.keyboard.type("\n\n/re");
+await page.locator(".cm-tooltip-autocomplete li", { hasText: "Cross reference" }).click();
+await page.locator(".cm-tooltip-autocomplete li", { hasText: "@fig:example" }).waitFor({ timeout: 5000 });
+console.log("/ref slash command opens the picker:", (await completionRows()).length, "labels");
+await page.keyboard.press("Escape");
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
 await page.keyboard.type("\n\n/to");
 await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
 await shot("13-slash-toc");
 await page.keyboard.press("Escape");
+await page.keyboard.type("\n\nA claim");
+await page.getByRole("button", { name: "Footnote" }).click();
+await settle(150);
+console.log("footnote button:", await page.locator(".cm-activeLine").first().textContent());
 
 // KaTeX hover, in the method chapter.
 await page.locator("li.group").nth(1).click();
@@ -323,16 +444,72 @@ await page.locator(".pf-math").first().hover();
 await page.waitForSelector(".pf-math-tooltip .katex", { timeout: 5000 });
 await shot("14-math-hover");
 
+// Figure inspector on the sample figure: width slider and the .wide toggle edit only its attributes.
+const figureLine = () => page.locator(".cm-line", { hasText: "figures/example.png" });
+await figureLine().click({ position: { x: 40, y: 8 } });
+await page.getByRole("button", { name: "Edit figure" }).click();
+const inspector = page.getByRole("dialog", { name: "Figure" });
+await inspector.getByRole("slider", { name: "Width" }).fill("50");
+await inspector.getByRole("checkbox", { name: /Span both columns/ }).check();
+await settle(200);
+await shot("14b-figure-inspector");
+console.log("figure after inspector:", await figureLine().textContent());
+await page.keyboard.press("Escape");
+
+// Pasting an image saves it into figures/ and inserts a labelled figure after the cursor's line.
+await page.locator(".cm-content").evaluate((el) => {
+  const data = new DataTransfer();
+  data.items.add(new File([new Uint8Array([137, 80, 78, 71])], "Screen Shot.png", { type: "image/png" }));
+  el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+});
+await page.locator(".cm-line", { hasText: "figures/screen-shot.png" }).waitFor({ timeout: 5000 });
+console.log("pasted figure:", await page.locator(".cm-line", { hasText: "figures/screen-shot.png" }).textContent());
+await page.keyboard.press("Escape");
+
 await page.getByRole("tab", { name: "Refs", exact: true }).click();
 await settle(200);
 await shot("15-references");
+
+// Add by DOI: a bad query explains itself, a good one is previewed, then appended to refs.bib.
+const doiInput = page.getByLabel("DOI or arXiv id");
+await doiInput.fill("not an id");
+await page.getByRole("button", { name: "Look up" }).click();
+console.log("bad DOI lookup:", await page.getByRole("alert").textContent({ timeout: 5000 }));
+await doiInput.fill("https://doi.org/10.5555/3295222.3295349");
+await page.getByRole("button", { name: "Look up" }).click();
+await page.getByRole("group", { name: "Reference preview" }).waitFor({ timeout: 5000 });
+await shot("15b-reference-preview");
+await page.getByRole("button", { name: "Add to refs.bib" }).click();
+await page.getByText("@vaswani2017attention", { exact: true }).waitFor({ timeout: 5000 });
+await settle(1500);
+const savedBib = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "project_save" && c.args.bib).at(-1)?.args.bib);
+console.log(
+  "add by DOI: entry listed,",
+  savedBib?.startsWith(fixture.bib) && savedBib.endsWith("year    = {2017}\n}\n") ? "refs.bib appended ok" : "refs.bib NOT appended",
+);
 await page.getByRole("tab", { name: "Figures", exact: true }).click();
 await settle(500);
 
-// Double-click a word in the PDF: the editor opens the part with that sentence.
+// Double-click a word in the PDF: with SyncTeX data the editor opens the line it names, and the
+// cursor reveal flashes the box it names.
 await page.getByRole("tab", { name: "Structure", exact: true }).click();
 await page.locator(".pf-page").first().scrollIntoViewIfNeeded();
 const span = page.locator(".textLayer span", { hasText: "measured" }).first();
+await span.scrollIntoViewIfNeeded();
+await page.evaluate(() => (window.__pfSynctexSource = { part: "sections/method.md", line: 3 }));
+await span.dblclick();
+await settle(500);
+console.log("SyncTeX double-click opened:", await editorTab(), "/", await page.locator(".cm-activeLine").first().textContent());
+await page.evaluate(() => (window.__pfSynctexPdf = { page: 2, x: 72, y: 300, width: 400, height: 12 }));
+await page.getByRole("button", { name: "Show cursor position in PDF" }).click();
+await settle(700);
+const revealedPage = await page.evaluate(() =>
+  [...document.querySelectorAll(".pf-page")].findIndex((p) => p.parentElement.querySelector(".pf-reveal")),
+);
+console.log("SyncTeX cursor reveal on page:", revealedPage + 1);
+await page.evaluate(() => (window.__pfSynctexSource = window.__pfSynctexPdf = null));
+
+// Without SyncTeX data: the editor opens the part with the clicked sentence.
 await span.scrollIntoViewIfNeeded();
 await span.dblclick();
 await settle(500);
@@ -402,29 +579,583 @@ await shot("21b-article-chapter-card");
 await pickTemplate("Article", "Thesis \\/ Report");
 console.log("report again: badges", JSON.stringify(await badges()), "· card", await cardOutline());
 
-// Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
-// on one part and on a part 20x longer.
+// Find/replace across parts: replace all, then Mod-Z undoes it in one part only, both in a part
+// that was in the view and in one that was not open during the replace.
+const findGroups = () =>
+  page.getByLabel("Find results").locator("section").evaluateAll((sections) =>
+    Object.fromEntries(sections.map((s) => [s.getAttribute("aria-label"), Number(s.querySelector("span + span").textContent)])),
+  );
+async function undoIn(title) {
+  await page.getByRole("button", { name: /^All chapters/ }).click();
+  await page.getByRole("menuitem", { name: new RegExp(`^\\d+\\. ${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).click();
+  await settle(300);
+  await page.click(".cm-content");
+  await page.keyboard.press("ControlOrMeta+z");
+  await settle(500);
+  return findGroups();
+}
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+Shift+f");
+await page.getByLabel("Find in all parts").fill("the");
+await page.getByRole("button", { name: "Match case" }).click();
+await page.getByRole("button", { name: "Whole word" }).click();
+await page.getByText("Skip math, code and citations").click();
+await page.getByLabel("Replace with").fill("THE");
+await settle(400);
+await shot("21c-find-results");
+const findBefore = await findGroups();
+const [inView, notOpen] = Object.keys(findBefore);
+await page.getByRole("region", { name: inView, exact: true }).locator("button").nth(1).click();
+await settle(300);
+await page.getByRole("button", { name: "Replace all" }).click();
+await settle(500);
+const findAfter = await findGroups();
+const afterUndoNotOpen = await undoIn(notOpen);
+const afterUndoInView = await undoIn(inView);
+const findOk =
+  Object.keys(findAfter).length === 0 &&
+  JSON.stringify(afterUndoNotOpen) === JSON.stringify({ [notOpen]: findBefore[notOpen] }) &&
+  afterUndoInView[inView] === findBefore[inView] &&
+  afterUndoInView[notOpen] === findBefore[notOpen];
+console.log(
+  `find/replace: ${findOk ? "ok" : "FAILED"} · before ${JSON.stringify(findBefore)} · after replace all ${JSON.stringify(findAfter)}`,
+  `· undo in ${notOpen} ${JSON.stringify(afterUndoNotOpen)} · undo in ${inView} ${JSON.stringify(afterUndoInView)}`,
+);
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+// Spell check: a misspelled word gets suggestions, and adding it to the project dictionary clears it.
+const typo = () => page.locator(".pf-spell", { hasText: "sentense" }).first();
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\n\nThis sentense has a typo. ");
+await typo().waitFor({ timeout: 10000 });
+await typo().hover();
+await page.locator(".pf-spell-suggestions button").first().waitFor({ timeout: 10000 });
+await shot("22-spell-suggestions");
+console.log("spell suggestions:", JSON.stringify(await page.locator(".pf-spell-suggestions button").allTextContents()));
+await page.getByRole("button", { name: "Add to project dictionary" }).click();
+await typo().waitFor({ state: "detached", timeout: 5000 });
+console.log(
+  "after adding to the project dictionary:",
+  JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "dictionary_add").map((c) => c.args.words))),
+);
+
+// Grammar check (English, Harper in a worker): a grammar mark offers suggestions and one fixes the
+// line; a misspelled word keeps only its spelling mark.
+const grammarMark = () => page.locator(".pf-grammar").filter({ hasText: /^an$/ }).first();
+const lintMarks = () =>
+  page.evaluate(() =>
+    [...document.querySelectorAll(".cm-lintRange")].map((el) => `${el.classList.contains("pf-grammar") ? "grammar" : el.classList.contains("pf-spell") ? "spell" : "other"}:${el.textContent}`),
+  );
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\n\nThis is an test of teh grammar checker. ");
+const grammarStart = Date.now();
+await grammarMark().waitFor({ timeout: 30000 });
+await page.locator(".pf-spell").filter({ hasText: /^teh$/ }).first().waitFor({ timeout: 10000 });
+await settle(1500);
+const marks = await lintMarks();
+const tehMarks = marks.filter((m) => m.endsWith(":teh"));
+console.log(
+  `grammar: first mark after ${Date.now() - grammarStart} ms · marks ${JSON.stringify(marks)} · "teh" ${
+    JSON.stringify(tehMarks) === JSON.stringify(["spell:teh"]) ? "spelling only, no duplicate" : `DUPLICATED ${JSON.stringify(tehMarks)}`
+  }`,
+);
+await grammarMark().hover();
+const grammarTip = page.locator(".cm-tooltip-lint .cm-diagnostic").filter({ has: page.locator(".cm-diagnosticAction", { hasText: "Ignore" }) }).first();
+await grammarTip.waitFor({ timeout: 5000 });
+await shot("22a-grammar-suggestions");
+const grammarActions = await grammarTip.locator(".cm-diagnosticAction").allTextContents();
+console.log("grammar message:", JSON.stringify(await grammarTip.locator(".cm-diagnosticText").textContent()), "· actions:", JSON.stringify(grammarActions));
+await grammarTip.locator(".cm-diagnosticAction").first().click();
+await settle(300);
+console.log(
+  "after the grammar suggestion:",
+  JSON.stringify(await page.locator(".cm-line").filter({ hasText: "grammar checker" }).first().textContent()),
+);
+await page.locator(".pf-grammar").filter({ hasText: /^an$/ }).waitFor({ state: "detached", timeout: 5000 });
+const grammarToggle = page.locator("footer").getByRole("button", { name: "Grammar check" });
+console.log("grammar toggle pressed:", await grammarToggle.getAttribute("aria-pressed"), "·", await grammarToggle.getAttribute("title"));
+
+// Word goals, set from the status bar counter.
+const wordCounter = page.locator("footer").getByRole("button", { name: "Word count" });
+await wordCounter.click();
+const goalDialog = page.getByRole("dialog", { name: "Word goals" });
+await goalDialog.getByRole("spinbutton", { name: /Document goal/ }).fill("5000");
+await goalDialog.getByRole("spinbutton", { name: /Session goal/ }).fill("200");
+await shot("22b-word-goal-popover");
+await goalDialog.getByRole("button", { name: "Set goal" }).click();
+await settle(200);
+await page.locator("footer").screenshot({ path: join(outDir, "22c-word-goal-status.png") });
+console.log("status bar with word goals:", await wordCounter.textContent());
+
+// LaTeX settings: preamble.tex opens as an editor tab and saves; the template ejects and restores.
+await page.getByRole("tab", { name: "Paper", exact: true }).click();
+await page.getByRole("button", { name: "Create preamble.tex" }).click();
+await settle(200);
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\\newcommand\\pf{PaperForge}\n");
+await settle(700);
+const preambleSaves = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "preamble_save").map((c) => c.args.content));
+console.log("preamble tab:", await editorTab(), "· last save:", JSON.stringify(preambleSaves.at(-1)));
+await page.getByRole("button", { name: "Eject template…" }).click();
+await settle(500);
+await shot("22d-eject-confirm");
+await page.getByRole("alertdialog", { name: "Eject template" }).getByRole("button", { name: "Eject" }).click();
+await page.getByRole("button", { name: "Restore built-in template" }).waitFor({ timeout: 5000 });
+await shot("22e-ejected");
+await page.getByRole("button", { name: "Restore built-in template" }).click();
+await page.getByRole("button", { name: "Eject template…" }).waitFor({ timeout: 5000 });
+console.log(
+  "template commands:",
+  (await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd.startsWith("template_")).map((c) => c.cmd))).join(", "),
+);
+
+// Page setup: margins, paper and header from the Paper tab end up in the saved paper.json; a
+// journal template says the journal sets the page.
+const pageSetup = page.getByRole("region", { name: "Page setup" });
+await pageSetup.scrollIntoViewIfNeeded();
+await pageSetup.getByRole("checkbox", { name: "Same on all sides" }).uncheck();
+await pageSetup.getByRole("spinbutton", { name: "Top margin" }).fill("3");
+await pageSetup.getByRole("spinbutton", { name: "Left margin" }).fill("2.2");
+await pageSetup.getByRole("combobox", { name: "Margin unit" }).selectOption("mm");
+await pageSetup.getByRole("combobox", { name: "Paper" }).selectOption("letterpaper");
+await pageSetup.getByRole("combobox", { name: "Line spacing" }).selectOption("onehalf");
+await pageSetup.getByRole("textbox", { name: "Header right" }).fill("Draft {page}");
+await settle(1200);
+await pageSetup.screenshot({ path: join(outDir, "22f-page-setup.png") });
+const savedMeta = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "project_save" && c.args.meta).at(-1)?.args.meta);
+console.log("page setup saved layout:", JSON.stringify(savedMeta?.layout), "· class options:", JSON.stringify(savedMeta?.classOptions));
+console.log("class options field:", await page.getByPlaceholder("twocolumn, 10pt").inputValue());
+await pickTemplate("Thesis / Report", "IEEE");
+await page.getByRole("tab", { name: "Paper", exact: true }).click();
+console.log("IEEE page setup:", await page.getByRole("region", { name: "Page setup" }).locator("p").textContent());
+await pickTemplate("IEEE Conference", "Thesis \\/ Report");
+
+// Styles: a character style applied to the editor's selection from the Paper panel adds the
+// built-in to the project; applying it again removes it.
 await editorTabs().first().click();
 await settle(300);
-async function typingCost(repeat) {
-  return page.evaluate(async (repeat) => {
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\n\nSmall caps here");
+await page.keyboard.press("Shift+Home");
+const applySmallcaps = () => page.getByRole("button", { name: "Apply smallcaps" });
+await applySmallcaps().scrollIntoViewIfNeeded();
+await applySmallcaps().click();
+await settle(700);
+await page.getByRole("list", { name: "Project styles" }).scrollIntoViewIfNeeded();
+await shot("22g-style-applied");
+const savedStyles = await page.evaluate(() =>
+  (window.__pfCalls.filter((c) => c.cmd === "project_save" && c.args.meta).at(-1)?.args.meta.styles ?? []).map((s) => s.name),
+);
+console.log("character style applied:", await page.locator(".cm-activeLine").first().textContent(), "· saved styles:", JSON.stringify(savedStyles));
+await applySmallcaps().click();
+await settle(200);
+console.log("character style applied again:", await page.locator(".cm-activeLine").first().textContent());
+
+// Writing mode: math, chips and figures render in place, the cursor's line shows its source,
+// and a click on a widget puts the cursor into its source.
+const modeButton = (name) => page.getByRole("group", { name: "Editor mode" }).getByRole("button", { name, exact: true });
+const activeLineText = () => page.locator(".cm-activeLine").first().textContent();
+async function openChapter(title) {
+  await page.getByRole("button", { name: /^All chapters/ }).click();
+  await page.getByRole("menuitem", { name: new RegExp(title) }).click();
+  await settle(300);
+}
+await editorTabs().first().click();
+await openChapter("Introduction");
+await modeButton("Writing").click();
+await page.locator(".pf-lp-chip").first().waitFor({ timeout: 5000 });
+await page.locator(".cm-line", { hasText: "Write your paper" }).click({ position: { x: 60, y: 8 } });
+await settle(200);
+const heading = () => page.locator(".cm-line.pf-lp-h1").first().textContent();
+const chips = (kind) => page.locator(`.pf-lp-${kind}`).allTextContents();
+console.log("writing mode: citation chips", JSON.stringify(await chips("cite")), "· reference chips", JSON.stringify(await chips("ref")));
+console.log("writing mode: heading away from the cursor:", JSON.stringify(await heading()));
+await shot("23-writing-mode");
+await page.keyboard.press("ControlOrMeta+Home");
+await settle(200);
+console.log("writing mode: heading with the cursor on it:", JSON.stringify(await heading()));
+await shot("23b-writing-heading-source");
+await page.locator(".pf-lp-cite").first().click();
+await settle(200);
+console.log("writing mode: clicked citation chip, cursor line:", JSON.stringify(await activeLineText()));
+await openChapter("Method");
+await page.locator(".pf-lp-math .katex").first().waitFor({ timeout: 5000 });
+await page.locator(".pf-lp-figure img").first().waitFor({ timeout: 5000 });
+await page.mouse.move(5, 890);
+await settle(300);
+console.log(
+  "writing mode: rendered math",
+  await page.locator(".pf-lp-math .katex").count(),
+  "· equation numbers",
+  JSON.stringify(await page.locator(".pf-lp-eqno").allTextContents()),
+  "· figures",
+  JSON.stringify(await page.locator(".pf-lp-caption").allTextContents()),
+);
+await shot("23c-writing-math-figure");
+
+// Writing mode tables: the sample's pipe table is a grid; each committed edit rewrites only its
+// lines as an aligned pipe table, and one Mod-Z undoes one edit.
+const docText = () =>
+  page.evaluate(async () => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    return EditorView.findFromDOM(document.querySelector(".cm-editor")).state.doc.toString();
+  });
+const TABLE = /\n(\|[^\n]*Model[\s\S]*?)\n\n/;
+const tableSource = async () => TABLE.exec(await docText())?.[1];
+const grid = page.locator(".pf-table").first();
+await grid.scrollIntoViewIfNeeded();
+const outsideTable = (await docText()).replace(TABLE, "");
+console.log("table grid: cells", await grid.locator("th, td").count(), "· caption", JSON.stringify(await page.locator(".pf-table-caption").first().textContent()));
+await grid.locator("td", { hasText: "0.812" }).click();
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("0.900");
+await page.keyboard.press("Tab");
+console.log("table after a cell edit:\n" + (await tableSource()));
+await grid.hover();
+await grid.getByRole("button", { name: "Add row below" }).click();
+await page.keyboard.type("Small");
+await page.keyboard.press("Enter");
+await grid.locator("td").first().click();
+await grid.getByRole("button", { name: "Align center" }).click();
+await settle(200);
+await shot("23d-writing-table-grid");
+console.log("table after adding a row and centering column 1:\n" + (await tableSource()));
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+console.log("table after one undo:\n" + (await tableSource()));
+console.log("text outside the table unchanged:", (await docText()).replace(TABLE, "") === outsideTable);
+await page.getByRole("textbox", { name: "Table caption" }).click();
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("Results on the held-out set.");
+await page.keyboard.press("Enter");
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("held out");
+await page.keyboard.press("Enter");
+await settle(200);
+console.log("caption after editing its text and label:", JSON.stringify((await docText()).match(/\n(: [^\n]*)/)?.[1]));
+await grid.getByRole("button", { name: "Edit as text" }).click();
+await settle(200);
+console.log("edit as text: grids", await page.locator(".pf-table").count(), "· cursor line", JSON.stringify(await activeLineText()));
+
+// `/table` asks for the size with a small grid, then inserts an aligned table with caption and label.
+await page.keyboard.press("ControlOrMeta+End");
+await page.mouse.move(5, 890);
+await page.keyboard.type("\n\n/table");
+await page.locator(".cm-tooltip-autocomplete li[aria-selected]", { hasText: "/table" }).waitFor({ timeout: 5000 });
+await page.keyboard.press("Enter");
+await page.getByRole("dialog", { name: "Insert table" }).waitFor({ timeout: 5000 });
+await page.keyboard.press("ArrowRight");
+await shot("23e-table-picker");
+console.log("table picker:", await page.locator(".pf-table-picker-size").textContent());
+await page.keyboard.press("Enter");
+await settle(200);
+const inserted = await docText();
+console.log("inserted table:\n" + inserted.slice(inserted.lastIndexOf("| Column 1")));
+await page.keyboard.press("Escape");
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+await page.locator(".pf-lp-math").first().hover();
+await settle(600);
+console.log("writing mode: KaTeX hover tooltips on rendered math:", await page.locator(".pf-math-tooltip").count());
+
+// Equation editor: a click on the display equation opens MathLive; Cancel and Escape leave the
+// text alone, and an edit of the raw LaTeX writes back only the formula between the `$$`.
+const editorDoc = () =>
+  page.evaluate(async () => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    return EditorView.findFromDOM(document.querySelector(".cm-editor")).state.doc.toString();
+  });
+const mathDialog = page.getByRole("dialog", { name: "Edit equation" });
+const openEquation = async () => {
+  await page.locator(".pf-lp-math-display").first().click();
+  await mathDialog.locator("math-field").waitFor({ timeout: 10000 });
+};
+const docBefore = await editorDoc();
+await openEquation();
+await settle(300);
+await shot("23d-equation-editor");
+console.log(
+  "equation editor: math-field",
+  JSON.stringify(await mathDialog.locator("math-field").evaluate((mf) => mf.value)),
+  "· raw",
+  JSON.stringify(await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).inputValue()),
+);
+await mathDialog.getByRole("button", { name: "Cancel" }).click();
+console.log("equation editor: cancel leaves the document unchanged:", (await editorDoc()) === docBefore);
+await openEquation();
+await page.keyboard.press("Escape");
+console.log("equation editor: escape leaves the document unchanged:", (await editorDoc()) === docBefore, "· open:", await mathDialog.count());
+await openEquation();
+await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).fill("H(X) = -\\sum_{x} p(x) \\log_2 p(x)");
+await settle(300);
+await shot("23e-equation-edited");
+await mathDialog.getByRole("button", { name: "Apply" }).click();
+await settle(200);
+const docAfter = await editorDoc();
+const changedLines = docAfter.split("\n").filter((line, i) => line !== docBefore.split("\n")[i]);
+console.log("equation editor: after apply, changed lines:", JSON.stringify(changedLines));
+await modeButton("Source").click();
+await settle(200);
+console.log(
+  "source mode again: widgets",
+  await page.locator(".pf-lp-math, .pf-lp-chip, .pf-lp-figure").count(),
+  "· math source shown:",
+  (await page.locator(".cm-content").textContent()).includes("$$H(X)"),
+);
+await page.locator(".cm-line", { hasText: "Inline math works" }).getByText("ge 0").click();
+await page.keyboard.press("ControlOrMeta+Alt+m");
+await mathDialog.locator("math-field").waitFor({ timeout: 5000 });
+console.log("source mode: Mod-Alt-m opens the equation editor on", JSON.stringify(await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).inputValue()));
+await shot("23f-equation-editor-source-mode");
+await page.keyboard.press("Escape");
+console.log("source mode: escape leaves the document unchanged:", (await editorDoc()) === docAfter);
+
+// Show LaTeX: Mod-Alt-L opens the cursor block's generated LaTeX; converting it to a raw LaTeX
+// block is one edit that Mod-Z undoes. In Writing mode the "TeX" handle opens the same popover.
+const editorText = () =>
+  page.evaluate(async () => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    return EditorView.findFromDOM(document.querySelector(".cm-editor")).state.doc.toString();
+  });
+const latexPopover = page.getByRole("dialog", { name: "Generated LaTeX" });
+await page.locator(".cm-line", { hasText: "Inline math works" }).click({ position: { x: 60, y: 8 } });
+await page.keyboard.press("ControlOrMeta+Alt+l");
+await latexPopover.locator(".cm-line").first().waitFor({ timeout: 5000 });
+await settle(200);
+await shot("24-show-latex");
+console.log("show LaTeX, first line:", JSON.stringify(await latexPopover.locator(".cm-line").first().textContent()));
+const beforeConvert = await editorText();
+await latexPopover.getByRole("button", { name: "Convert to raw LaTeX…" }).click();
+await shot("24b-convert-confirm");
+console.log("convert warning:", JSON.stringify(await latexPopover.getByRole("alert").textContent()));
+await latexPopover.getByRole("button", { name: "Convert", exact: true }).click();
+await settle(200);
+const converted = (await editorText()).split("\n");
+const fenceAt = converted.indexOf("```{=latex}");
+console.log("converted Markdown:", JSON.stringify(converted.slice(Math.max(0, fenceAt - 1), converted.indexOf("```", fenceAt) + 2)));
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+console.log("undo restores the Markdown:", (await editorText()) === beforeConvert, "· popover open:", await latexPopover.count());
+await modeButton("Writing").click();
+await page.locator(".cm-line", { hasText: "Inline math works" }).click({ position: { x: 60, y: 8 } });
+await settle(200);
+await page.locator(".pf-showlatex-handle").click();
+await latexPopover.locator(".cm-line").first().waitFor({ timeout: 5000 });
+await shot("24c-show-latex-writing");
+console.log("writing mode TeX handle, first line:", JSON.stringify(await latexPopover.locator(".cm-line").first().textContent()));
+await page.keyboard.press("Escape");
+await settle(150);
+console.log("after Escape, popover open:", await latexPopover.count());
+await modeButton("Source").click();
+await settle(200);
+
+// The generated tab follows the Markdown cursor, and a double-click goes back to the Markdown.
+await page.evaluate(() => (window.__pfGeneratedTex = true));
+await page.locator(".cm-line", { hasText: "Raw LaTeX passes" }).click({ position: { x: 60, y: 8 } });
+await page.getByRole("tab", { name: "LaTeX (generated)" }).click();
+await settle(800);
+await shot("25-generated-follows");
+console.log("generated tab followed the cursor to:", JSON.stringify(await activeLineText()));
+await page.locator(".cm-line", { hasText: "Lists, *emphasis*" }).first().dblclick({ position: { x: 60, y: 8 } });
+await settle(500);
+console.log("generated double-click jumped to:", await editorTab(), "/", JSON.stringify(await activeLineText()));
+await page.evaluate(() => (window.__pfGeneratedTex = false));
+await openChapter("Method");
+
+// Comments: Mod-Alt-C on a selection asks for the commenter's name once, then the text, and wraps
+// only the selection; the panel lists, resolves and deletes; Review compiles with `review`.
+const selectText = (text) =>
+  page.evaluate(async (text) => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    const view = EditorView.findFromDOM(document.querySelector(".cm-editor"));
+    const from = view.state.doc.toString().indexOf(text);
+    view.dispatch({ selection: { anchor: from, head: from + text.length } });
+    view.focus();
+  }, text);
+const methodBefore = await editorText();
+await selectText("works as usual");
+await page.keyboard.press("ControlOrMeta+Alt+c");
+const addBox = page.getByRole("dialog", { name: "Add comment" });
+await addBox.getByLabel("Your name").fill("Ada Lovelace");
+await addBox.getByLabel("Comment").fill('Is "usual" the right word?');
+await shot("26-add-comment");
+await addBox.getByRole("button", { name: "Comment", exact: true }).click();
+await settle(200);
+const commented = (await editorText()).split("\n");
+const changedComment = commented.filter((line, i) => line !== methodBefore.split("\n")[i]);
+console.log("comment Markdown:", JSON.stringify(changedComment));
+console.log(
+  "comment wraps only the selection:",
+  commented.join("\n").replace(/\[(works as usual)\]\{\.comment author="Ada Lovelace" date="[\d-]+T[\d:]+" text="Is \\"usual\\" the right word\?"\}/, "$1") ===
+    methodBefore,
+);
+await selectText("labeled display equations");
+await page.keyboard.press("ControlOrMeta+Alt+c");
+console.log("second comment asks for the name again:", await addBox.getByLabel("Your name").count());
+await addBox.getByLabel("Comment").fill("Say numbered?");
+await addBox.getByLabel("Comment").press("ControlOrMeta+Enter");
+await settle(200);
+await page.getByRole("tab", { name: "Review", exact: true }).click();
+const commentCards = () => page.getByRole("list", { name: "Comments" }).getByRole("listitem");
+await commentCards().first().waitFor({ timeout: 5000 });
+await settle(200);
+await shot("26b-comments-panel");
+console.log("comments panel:", JSON.stringify(await commentCards().evaluateAll((cards) => cards.map((c) => c.innerText.replace(/\s+/g, " ").trim()))));
+await commentCards().first().getByRole("button", { name: "Resolve comment" }).click();
+await settle(200);
+console.log("after resolve, cards:", await commentCards().count(), "· Markdown:", JSON.stringify((await editorText()).split("\n").find((l) => l.includes("works as usual"))));
+await page.getByText("Show resolved").click();
+console.log("with resolved shown, cards:", await commentCards().count());
+await commentCards().nth(1).getByRole("button", { name: "Delete comment" }).click();
+await settle(200);
+console.log("after delete:", await commentCards().count(), "card(s) · text kept:", (await editorText()).includes("and labeled display equations are numbered"));
+await modeButton("Writing").click();
+await page.locator(".cm-line", { hasText: "Raw LaTeX passes" }).click({ position: { x: 60, y: 8 } });
+await page.locator(".pf-comment-marker").first().waitFor({ timeout: 5000 });
+await page.locator(".pf-comment").first().scrollIntoViewIfNeeded();
+await page.locator(".pf-comment").first().hover();
+await settle(1200);
+await shot("26c-comment-writing-mode");
+console.log(
+  "writing mode: highlighted",
+  JSON.stringify(await page.locator(".pf-comment").allTextContents()),
+  "· marker title",
+  JSON.stringify(await page.locator(".pf-comment-marker").first().getAttribute("title")),
+);
+await page.locator(".pf-comment-marker").first().click();
+const editBox = page.getByRole("dialog", { name: "Edit comment" });
+await editBox.waitFor({ timeout: 5000 });
+await shot("26d-comment-edit-box");
+await editBox.getByRole("button", { name: "Reopen" }).click();
+await settle(200);
+console.log("reopened from the marker:", !(await editorText()).includes("resolved=true"));
+await modeButton("Source").click();
+await settle(200);
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await page.waitForFunction(() => window.__pfCalls.some((c) => c.cmd === "compile" && c.args.review === true), null, { timeout: 5000 });
+await settle(600);
+await shot("26e-review-mode");
+const reviewCompiles = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").slice(-1).map((c) => c.args));
+console.log("review toggle compile:", JSON.stringify(reviewCompiles), "· preview badge:", await page.getByText("Review PDF", { exact: true }).count());
+await page.getByRole("button", { name: "Export" }).click();
+await page.getByRole("menuitem", { name: /Review PDF/ }).click();
+await page.waitForFunction(() => window.__pfCalls.some((c) => c.cmd === "export_pdf"), null, { timeout: 10000 });
+console.log("export review PDF:", JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "export_pdf").map((c) => c.args))));
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await settle(600);
+console.log("review off, last compile review:", await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1).args.review));
+
+// Track changes: with the toolbar toggle on, typed text becomes an insertion and backspaced text
+// a deletion; the Review panel accepts one and rejects the other; Mod-Z takes back a tracked edit
+// in one step; Review compiles with `review`.
+const placeCursor = (after) =>
+  page.evaluate(async (after) => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    const view = EditorView.findFromDOM(document.querySelector(".cm-editor"));
+    const at = view.state.doc.toString().indexOf(after) + after.length;
+    view.dispatch({ selection: { anchor: at } });
+    view.focus();
+  }, after);
+const rawLine = async () => (await editorText()).split("\n").find((l) => l.startsWith("Raw LaTeX"));
+const trackButton = page.getByRole("button", { name: "Track changes", exact: true });
+await trackButton.click();
+await settle(200);
+console.log(
+  "track changes toggle:",
+  await trackButton.getAttribute("aria-pressed"),
+  "· stored:",
+  JSON.stringify(await page.evaluate(() => Object.entries(localStorage).filter(([k]) => k.startsWith("paperforge.trackChanges:")))),
+);
+await placeCursor("untouched");
+await page.keyboard.type(" and safe", { delay: 20 });
+await placeCursor("untouched and safe]");
+await settle(100);
+const afterTyping = await rawLine();
+await placeCursor("when");
+for (let i = 0; i < 4; i++) await page.keyboard.press("Backspace");
+await settle(200);
+console.log("tracked Markdown:", JSON.stringify(await rawLine()), "· after typing:", JSON.stringify(afterTyping));
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+console.log("undo takes back the tracked deletion:", JSON.stringify(await rawLine()));
+await page.keyboard.press("ControlOrMeta+Shift+z");
+await settle(200);
+console.log("redo:", JSON.stringify(await rawLine()));
+await modeButton("Writing").click();
+await page.locator(".cm-line", { hasText: "Inline math works" }).click({ position: { x: 60, y: 8 } });
+await page.locator(".pf-insertion").first().waitFor({ timeout: 5000 });
+await page.locator(".pf-insertion").first().scrollIntoViewIfNeeded();
+await page.locator(".pf-insertion").first().hover();
+await page.getByRole("group", { name: "Tracked change" }).waitFor({ timeout: 5000 });
+await shot("27-track-changes-writing");
+console.log(
+  "writing mode changes: inserted",
+  JSON.stringify(await page.locator(".pf-insertion").allTextContents()),
+  "· deleted",
+  JSON.stringify(await page.locator(".pf-deletion").allTextContents()),
+  "· raw line shown:",
+  JSON.stringify(await page.locator(".cm-line", { hasText: "Raw LaTeX" }).first().textContent()),
+);
+await modeButton("Source").click();
+await settle(200);
+await page.getByRole("tab", { name: "Review", exact: true }).click();
+const changeCards = (kind) => page.getByRole("listitem", { name: new RegExp(`^${kind} by `) });
+await changeCards("Insertion").first().waitFor({ timeout: 5000 });
+await settle(200);
+await shot("27b-review-panel");
+console.log(
+  "review panel changes:",
+  JSON.stringify(await page.getByRole("region", { name: "Changes" }).getByRole("listitem").evaluateAll((cards) => cards.map((c) => c.innerText.replace(/\s+/g, " ").trim()))),
+);
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await page.waitForFunction(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1)?.args.review === true, null, { timeout: 5000 });
+console.log("review compile with tracked changes:", JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1).args)));
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await settle(300);
+await changeCards("Insertion").first().getByRole("button", { name: "Accept change" }).click();
+await settle(200);
+await changeCards("Deletion").first().getByRole("button", { name: "Reject change" }).click();
+await settle(200);
+console.log("after accept insertion and reject deletion:", JSON.stringify(await rawLine()), "· cards left:", await changeCards("(Insertion|Deletion)").count());
+await trackButton.click();
+await settle(200);
+console.log("track changes off:", await trackButton.getAttribute("aria-pressed"));
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+
+// Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
+// on one part and on a part 20x longer, with the cursor in view, in Source and Writing mode.
+await editorTabs().first().click();
+await settle(300);
+async function typingCost(repeat, tracked = false) {
+  return page.evaluate(async ({ repeat, tracked }) => {
     // The same pre-bundled module instance the app loaded, so findFromDOM sees its views.
     const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
     const { EditorView } = await import(url);
     const view = EditorView.findFromDOM(document.querySelector(".cm-editor"));
+    const original = view.state.doc.toString();
     if (repeat > 1) {
-      const doc = view.state.doc.toString();
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: Array(repeat).fill(doc).join("\n\n") } });
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: Array(repeat).fill(original).join("\n\n") } });
       await new Promise((r) => setTimeout(r, 500));
     }
-    view.dispatch({ selection: { anchor: Math.floor(view.state.doc.length / 2) } });
+    const middle = Math.floor(view.state.doc.length / 2);
+    view.dispatch({ selection: { anchor: middle }, effects: EditorView.scrollIntoView(middle, { y: "center" }) });
+    await new Promise((r) => setTimeout(r, 300));
     const sync = [];
     let longTasks = 0;
     const po = new PerformanceObserver((list) => (longTasks += list.getEntries().length));
     po.observe({ type: "longtask" });
     for (let i = 0; i < 300; i++) {
       const t = performance.now();
-      view.dispatch(view.state.replaceSelection(i % 40 === 39 ? "\n" : "x"));
+      const spec = view.state.replaceSelection(i % 40 === 39 ? "\n" : "x");
+      view.dispatch(tracked ? { ...spec, userEvent: "input.type" } : spec);
       sync.push(performance.now() - t);
       if (i % 10 === 0) await new Promise((r) => requestAnimationFrame(r));
     }
@@ -432,11 +1163,27 @@ async function typingCost(repeat) {
     po.disconnect();
     sync.sort((a, b) => a - b);
     const lines = view.state.doc.lines;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: original } });
+    await new Promise((r) => setTimeout(r, 300));
     return { lines, p50: sync[150].toFixed(2), p95: sync[285].toFixed(2), max: sync[299].toFixed(2), longTasks };
-  }, repeat);
+  }, { repeat, tracked });
 }
-console.log("typing, one part (ms/keystroke):", JSON.stringify(await typingCost(1)));
-console.log("typing, 20x part (ms/keystroke):", JSON.stringify(await typingCost(20)));
+for (const mode of ["Source", "Writing"]) {
+  await modeButton(mode).click();
+  await settle(300);
+  console.log(`typing, ${mode} mode, one part (ms/keystroke):`, JSON.stringify(await typingCost(1)));
+  console.log(`typing, ${mode} mode, 20x part (ms/keystroke):`, JSON.stringify(await typingCost(20)));
+}
+// The same keystrokes as typed input with Track changes on, so each one goes through tracking.
+await trackButton.click();
+for (const mode of ["Source", "Writing"]) {
+  await modeButton(mode).click();
+  await settle(300);
+  console.log(`typing tracked, ${mode} mode, one part (ms/keystroke):`, JSON.stringify(await typingCost(1, true)));
+  console.log(`typing tracked, ${mode} mode, 20x part (ms/keystroke):`, JSON.stringify(await typingCost(20, true)));
+}
+await trackButton.click();
+await modeButton("Source").click();
 await settle(800);
 
 const calls = await page.evaluate(() => window.__pfCalls);

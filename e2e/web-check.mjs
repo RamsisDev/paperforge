@@ -23,7 +23,7 @@ const shot = (name) => page.screenshot({ path: join(outDir, `${name}.png`) });
 const pdfPath = join(projectDir, ".build", "paper.pdf");
 const mtime = () => statSync(pdfPath, { throwIfNoEntry: false })?.mtimeMs ?? 0;
 
-await page.goto("http://localhost:1420/");
+await page.goto(process.env.PF_URL ?? "http://localhost:1420/");
 await page.waitForSelector(".cm-content", { timeout: 20000 });
 await page.waitForSelector(".pf-page canvas", { timeout: 60000 });
 await page.waitForTimeout(500);

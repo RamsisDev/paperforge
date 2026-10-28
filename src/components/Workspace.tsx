@@ -1,4 +1,4 @@
-import { BookOpen, ChevronsUpDown, FileCode, FilePlus, FileText } from "lucide-react";
+import { BookOpen, ChevronsUpDown, FileCode, FileCog, FilePlus, FileText } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
@@ -11,7 +11,7 @@ import { parseBib } from "@/lib/bib";
 import { partTitle } from "@/lib/parts";
 import { unitName } from "@/lib/templates";
 import { compileNow, refreshTex, setBib } from "@/session";
-import { BIB_FILE, TEX_FILE, askNewPart, isPartFile, openFile, store, useStore, type EditorFile } from "@/store";
+import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, askNewPart, isPartFile, openFile, store, useStore, type EditorFile } from "@/store";
 import { Editor } from "./Editor";
 import { Preview } from "./Preview";
 import { ProblemsPanel } from "./ProblemsPanel";
@@ -66,6 +66,7 @@ function PartSwitcher({ current }: { current: EditorFile }) {
 function EditorPane() {
   const activeFile = useStore((s) => s.activeFile);
   const problemsOpen = useStore((s) => s.problemsOpen);
+  const hasPreamble = useStore((s) => s.preamble !== null);
   // The part tab keeps pointing at the last part edited while refs.bib or the LaTeX is shown.
   const lastPart = useRef<EditorFile>("");
   const files = useStore(useShallow((s) => s.parts.map((p) => p.file)));
@@ -90,6 +91,7 @@ function EditorPane() {
           tabs={[
             { id: partFile, label: partLabel, icon: <FileText size={13} />, truncate: true },
             { id: BIB_FILE, label: BIB_FILE, icon: <BookOpen size={13} /> },
+            ...(hasPreamble ? [{ id: PREAMBLE_FILE, label: PREAMBLE_FILE, icon: <FileCog size={13} /> }] : []),
             { id: TEX_FILE, label: "LaTeX (generated)", icon: <FileCode size={13} /> },
           ]}
         />

@@ -4,6 +4,12 @@
 --   $$ ... $$ {#eq:x}         -> numbered equation with \label
 --   {.wide} on a figure/table -> spans both columns (figure* / table*)
 --   tables                    -> table float + tabular (longtable breaks two-column classes)
+--   <!--pf:N--> block markers -> %PF:N comment lines (Markdown line N starts the next block)
+--   ::: {.x} / [..]{.x}       -> \begin{pf-x}...\end{pf-x} / \pfstylex{...} for project styles
+--   [..]{.comment …}          -> review markup: highlighted with a note in the review PDF
+--                                (`pf-review` metadata), the bare text in the final one
+--   [..]{.insertion …}        -> underlined in the review PDF, the bare text in the final one
+--   [..]{.deletion …}         -> struck through in the review PDF, left out of the final one
 
 local REF_PREFIXES = { fig = true, tbl = true, eq = true, sec = true }
 
@@ -28,8 +34,32 @@ end
 -- Set from metadata for numeric-only BibTeX styles, which cannot print author names.
 local numeric_only = false
 
+-- Styled classes from `pf-styles` metadata (`div:note span:smallcaps`), each mapped to its
+-- LaTeX environment or command name as `styles.rs` defines them in the preamble.
+local div_styles = {}
+local span_styles = {}
+
+local function style_command(name)
+  local encoded = name:gsub("%d", function(d) return string.char(65 + tonumber(d)) end):gsub("%-", "Z")
+  return "\\pfstyle" .. encoded
+end
+
+-- Set from `pf-review` metadata: the review PDF renders review markup, the final PDF strips it.
+local review = false
+
 local function read_meta(meta)
   numeric_only = meta["numeric-only-citations"] == true
+  review = meta["pf-review"] == true
+  local spec = meta["pf-styles"]
+  if spec then
+    for kind, name in pandoc.utils.stringify(spec):gmatch("(%a+):([%w%-]+)") do
+      if kind == "div" then
+        div_styles[name] = "pf-" .. name
+      elseif kind == "span" then
+        span_styles[name] = style_command(name)
+      end
+    end
+  end
 end
 
 -- Set for the parts of chapter templates, where a part is one chapter. Every later heading at
@@ -85,6 +115,9 @@ end
 -- $$...$$ {#eq:x}
 local function Para(el)
   local inlines = el.content
+  if #inlines == 0 then
+    return {}
+  end
   local changed = false
   local out = {}
   local i = 1
@@ -221,7 +254,279 @@ local function Table(tbl)
   return pandoc.RawBlock("latex", table.concat(lines, "\n"))
 end
 
+-- The element's styled classes, in order, and the element without them, or nil when it has none.
+-- Classes the project does not style (Pandoc's own `.smallcaps`, `.mark`, …) stay on it.
+local function split_styles(el, known)
+  local styled, rest = {}, pandoc.List()
+  for _, class in ipairs(el.classes) do
+    if known[class] then
+      table.insert(styled, known[class])
+    else
+      rest:insert(class)
+    end
+  end
+  if #styled == 0 then
+    return nil
+  end
+  el.classes = rest
+  return styled, el
+end
+
+local function Div(el)
+  local styled, inner = split_styles(el, div_styles)
+  if not styled then
+    return nil
+  end
+  local blocks = pandoc.List({ inner })
+  if inner.identifier == "" and #inner.classes == 0 and #inner.attributes == 0 then
+    blocks = inner.content
+  end
+  for i = #styled, 1, -1 do
+    blocks:insert(1, pandoc.RawBlock("latex", "\\begin{" .. styled[i] .. "}"))
+    blocks:insert(pandoc.RawBlock("latex", "\\end{" .. styled[i] .. "}"))
+  end
+  return blocks
+end
+
+-- Review markup ------------------------------------------------------------------------------
+
+local PLAIN_INLINES = { Str = true, Space = true, SoftBreak = true }
+local SPACE_INLINES = { Space = true, SoftBreak = true }
+-- Formatting kept around its marked content.
+local WRAPPER_INLINES = {
+  Emph = true, Strong = true, Underline = true, SmallCaps = true, Strikeout = true,
+  Superscript = true, Subscript = true, Quoted = true, Span = true,
+}
+
+-- Line breaks stay where the Markdown has them, as in the fragment, so lines keep mapping back.
+local REVIEW_OPTIONS = { cite_method = PANDOC_WRITER_OPTIONS.cite_method, wrap_text = "wrap-preserve" }
+
+local function review_latex(inlines)
+  local out = pandoc.write(pandoc.Pandoc({ pandoc.Plain(inlines) }), "latex", REVIEW_OPTIONS)
+  return (out:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- The LaTeX of review markup already rendered, so an enclosing span does not mark it again.
+local rendered = {}
+
+local function rendered_latex(text)
+  rendered[text] = true
+  return pandoc.RawInline("latex", text)
+end
+
+-- Words whose LaTeX is a command or a group (`\%`, `\textbackslash{}`, `~`) are not plain for
+-- soul, which reads its argument token by token.
+local function soul_safe(str)
+  return not review_latex({ str }):find("[\\{}~$^]")
+end
+
+-- Marks inlines for the review PDF. Runs of plain words go through `text_cmd` (built on soul's
+-- `\hl`, which breaks lines but fails on math, citations and most commands); every other inline
+-- goes through `box_cmd` (an unbreakable box); formatting stays around its marked content and
+-- footnotes stay unmarked, since a box would swallow them. Spaces at the edges of a run stay
+-- outside it.
+local function review_mark(inlines, text_cmd, box_cmd)
+  local out = pandoc.List()
+  local run = pandoc.List()
+  local function flush()
+    while #run > 0 and SPACE_INLINES[run[1].t] do
+      out:insert(run:remove(1))
+    end
+    local trailing = pandoc.List()
+    while #run > 0 and SPACE_INLINES[run[#run].t] do
+      trailing:insert(1, run:remove())
+    end
+    if #run > 0 then
+      out:insert(rendered_latex(text_cmd .. "{" .. review_latex(run) .. "}"))
+    end
+    out:extend(trailing)
+    run = pandoc.List()
+  end
+  for _, el in ipairs(inlines) do
+    if PLAIN_INLINES[el.t] and (el.t ~= "Str" or soul_safe(el)) then
+      run:insert(el)
+    else
+      flush()
+      if WRAPPER_INLINES[el.t] then
+        el.content = review_mark(el.content, text_cmd, box_cmd)
+        out:insert(el)
+      elseif el.t == "Note" or (el.t == "RawInline" and rendered[el.text]) then
+        out:insert(el)
+      else
+        out:insert(rendered_latex(box_cmd .. "{" .. review_latex({ el }) .. "}"))
+      end
+    end
+  end
+  flush()
+  return out
+end
+
+-- An attribute as literal LaTeX text.
+local function attribute_latex(el, key)
+  return review_latex(pandoc.Inlines(el.attributes[key] or ""))
+end
+
+local function unwrap(el)
+  return el.content
+end
+
+-- Set on comments whose note cannot go into the margin: `\marginpar` fails in footnotes, floats
+-- and table cells, and a heading would repeat it in the table of contents.
+local INLINE_NOTE = "pf-inline-note"
+
+local function mark_inline_notes(el)
+  return el:walk({
+    Span = function(span)
+      if span.classes:includes("comment") then
+        span.attributes[INLINE_NOTE] = "true"
+        return span
+      end
+    end,
+  })
+end
+
+local function review_comment(el)
+  if el.attributes.resolved == "true" then
+    return el.content
+  end
+  local note = el.attributes[INLINE_NOTE] and "\\pfcommentinline" or "\\pfcommentnote"
+  local out = review_mark(el.content, "\\pfcommenthl", "\\pfcommentbox")
+  out:insert(rendered_latex(note .. "{" .. attribute_latex(el, "author") .. "}{" .. attribute_latex(el, "text") .. "}"))
+  return out
+end
+
+-- Left where the final PDF drops a deletion, so `close_deletions` can merge the spaces around it
+-- the way Pandoc reads the text once the deletion is accepted.
+local DELETED = "pf-deleted"
+
+local function drop(_)
+  return { pandoc.RawInline(DELETED, "") }
+end
+
+local function review_insertion(el)
+  return review_mark(el.content, "\\pfinsertionhl", "\\pfinsertionbox")
+end
+
+local function review_deletion(el)
+  return review_mark(el.content, "\\pfdeletionhl", "\\pfdeletionbox")
+end
+
+-- Span classes of review markup: `review` renders a span in the review PDF and `final` in the
+-- final one, both returning inlines. The LaTeX commands they emit are defined in `review.rs`.
+local REVIEW_SPANS = {
+  comment = { review = review_comment, final = unwrap },
+  insertion = { review = review_insertion, final = unwrap },
+  deletion = { review = review_deletion, final = drop },
+}
+
+local function is_deleted(el)
+  return el.t == "RawInline" and el.format == DELETED
+end
+
+-- Where deletions were dropped, the spaces around them become one (a line break if one of them
+-- is), and none at the edges of the list, as Pandoc reads the text once they are accepted.
+local function close_deletions(inlines)
+  if not inlines:find_if(is_deleted) then
+    return nil
+  end
+  local out = pandoc.List()
+  local gap = pandoc.List()
+  local function flush(at_end)
+    local dropped = gap:find_if(is_deleted)
+    if not dropped then
+      out:extend(gap)
+    elseif #out > 0 and not at_end then
+      local spaces = gap:filter(function(el) return SPACE_INLINES[el.t] end)
+      if #spaces > 0 then
+        out:insert(spaces:find_if(function(el) return el.t == "SoftBreak" end) or spaces[1])
+      end
+    end
+    gap = pandoc.List()
+  end
+  for _, el in ipairs(inlines) do
+    if is_deleted(el) or SPACE_INLINES[el.t] then
+      gap:insert(el)
+    else
+      flush(false)
+      out:insert(el)
+    end
+  end
+  flush(true)
+  return out
+end
+
+-- A block that only held deletions, such as a list item.
+local function drop_emptied(el)
+  if #el.content == 0 then
+    return {}
+  end
+end
+
+local function review_kind(el)
+  for _, class in ipairs(el.classes) do
+    if REVIEW_SPANS[class] then
+      return REVIEW_SPANS[class]
+    end
+  end
+end
+
+local function Span(el)
+  local kind = review_kind(el)
+  if kind then
+    return review and kind.review(el) or kind.final(el)
+  end
+  local styled, inner = split_styles(el, span_styles)
+  if not styled then
+    return nil
+  end
+  local inlines = pandoc.List({ inner })
+  if inner.identifier == "" and #inner.classes == 0 and #inner.attributes == 0 then
+    inlines = inner.content
+  end
+  for i = #styled, 1, -1 do
+    inlines:insert(1, pandoc.RawInline("latex", styled[i] .. "{"))
+    inlines:insert(pandoc.RawInline("latex", "}"))
+  end
+  return inlines
+end
+
+-- The reader turns `[x]{.smallcaps}` and `[x]{.underline}` into elements of their own.
+local function styled_element(class)
+  return function(el)
+    local command = span_styles[class]
+    if not command then
+      return nil
+    end
+    local inlines = pandoc.List(el.content)
+    inlines:insert(1, pandoc.RawInline("latex", command .. "{"))
+    inlines:insert(pandoc.RawInline("latex", "}"))
+    return inlines
+  end
+end
+
+local function prepare_review(doc)
+  if not review then
+    return nil
+  end
+  return doc:walk({
+    Note = mark_inline_notes, Figure = mark_inline_notes, Table = mark_inline_notes, Header = mark_inline_notes,
+  })
+end
+
+local function RawBlock(el)
+  if el.format ~= "html" then
+    return nil
+  end
+  local line = el.text:match("^<!%-%-pf:(%d+)%-%->$")
+  if line then
+    return pandoc.RawBlock("latex", "%PF:" .. line)
+  end
+end
+
 return {
   { Meta = read_meta, Pandoc = scope_headings_to_file },
-  { Cite = Cite, Para = Para, Figure = Figure, Table = Table },
+  { Pandoc = prepare_review },
+  { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock, Inlines = close_deletions,
+    Plain = drop_emptied, Div = Div, Span = Span,
+    SmallCaps = styled_element("smallcaps"), Underline = styled_element("underline") },
 }

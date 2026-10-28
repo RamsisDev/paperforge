@@ -38,12 +38,22 @@ import {
 import { tags as t } from "@lezer/highlight";
 import katex from "katex";
 import { parseBib, shortAuthors } from "@/lib/bib";
-import type { Part } from "@/lib/api";
-import { labels, levelInChapter, type Labels } from "@/lib/outline";
-import { allText } from "@/lib/parts";
+import { levelInChapter } from "@/lib/outline";
 import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
+import { trackChanges } from "./changes";
+import { comments } from "./comments";
+import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs";
+import { grammarCheck } from "./grammar";
+import { spellCheck } from "./spell";
+import { figureTools } from "./figureInspector";
+import { markdownFolding } from "./folding";
+import { editorModeExtension, previewDecorations } from "./livepreview";
+import { mathEditorKeymap } from "./livepreview/math";
+import { generatedNavigation, showLatex } from "./livepreview/showlatex";
+import { tableSlashCommand } from "./livepreview/table/insert";
+import { styleSlashCommands } from "./styles";
 
 const highlight = HighlightStyle.define([
   { tag: t.heading1, fontWeight: "700", fontSize: "1.25em", color: "var(--pf-syn-heading)" },
@@ -95,6 +105,7 @@ function mathAt(state: EditorState, pos: number): { from: number; to: number; te
 
 const mathTooltip = hoverTooltip(
   (view, pos) => {
+    if (previewDecorations(view.state)) return null;
     const math = mathAt(view.state, pos);
     if (!math) return null;
     return {
@@ -112,23 +123,12 @@ const mathTooltip = hoverTooltip(
   { hoverTime: 250 },
 );
 
-const REF_KINDS: Record<string, string> = { fig: "Figure", tbl: "Table", eq: "Equation", sec: "Section" };
-
 let bibCache: { source: string; entries: ReturnType<typeof parseBib> } = { source: "", entries: [] };
 
 function bibEntries() {
   const source = store.get().bib;
   if (source !== bibCache.source) bibCache = { source, entries: parseBib(source) };
   return bibCache.entries;
-}
-
-let labelCache: { parts: Part[]; labels: Labels } = { parts: [], labels: labels("") };
-
-/** Labels from every part: a reference may point into another file. */
-function documentLabels(): Labels {
-  const parts = store.get().parts;
-  if (parts !== labelCache.parts) labelCache = { parts, labels: labels(allText(parts)) };
-  return labelCache.labels;
 }
 
 function citationCompletions(context: CompletionContext): CompletionResult | null {
@@ -143,16 +143,13 @@ function citationCompletions(context: CompletionContext): CompletionResult | nul
     type: "text",
     boost: 1,
   }));
-  for (const [kind, ids] of Object.entries(documentLabels())) {
-    for (const id of ids) options.push({ label: `@${id}`, detail: REF_KINDS[kind], type: "variable" });
-  }
+  options.push(...labelOptions());
   return { from: word.from, options, validFor: /^@[\w:.-]*$/ };
 }
 
 const SLASH_COMMANDS: { label: string; detail: string; template: string }[] = [
   { label: "/figure", detail: "Image with caption and label", template: SNIPPETS.figure },
   { label: "/figure-wide", detail: "Figure across both columns", template: SNIPPETS.wideFigure },
-  { label: "/table", detail: "Table with caption and label", template: SNIPPETS.table },
   { label: "/equation", detail: "Numbered display equation", template: SNIPPETS.equation },
   { label: "/code", detail: "Fenced code block", template: SNIPPETS.code },
   { label: "/quote", detail: "Block quote", template: SNIPPETS.quote },
@@ -167,10 +164,17 @@ function slashCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/^\s*\/[\w-]*/);
   if (!word) return null;
   const from = word.from + word.text.indexOf("/");
+  // A typed `/ref` belongs to the reference picker.
+  if (context.state.sliceDoc(from, context.pos).startsWith("/ref")) return null;
   return {
     from,
-    options: SLASH_COMMANDS.map((c) => snippetCompletion(c.template, { label: c.label, detail: c.detail, type: "keyword" })),
-    validFor: /^\/[\w-]*$/,
+    options: [
+      ...SLASH_COMMANDS.map((c) => snippetCompletion(c.template, { label: c.label, detail: c.detail, type: "keyword" })),
+      tableSlashCommand,
+      refSlashCommand,
+      ...styleSlashCommands(),
+    ],
+    validFor: (text) => /^\/[\w-]*$/.test(text) && !text.startsWith("/ref"),
   };
 }
 
@@ -352,6 +356,7 @@ function base(): Extension[] {
     EditorView.lineWrapping,
     flashField,
     lintGutter(),
+    markdownFolding,
     keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap, ...lintKeymap, indentWithTab]),
   ];
 }
@@ -359,6 +364,7 @@ function base(): Extension[] {
 export function markdownExtensions(onChange: Extension): Extension[] {
   return [
     formattingKeymap,
+    mathEditorKeymap,
     ...base(),
     markdown({ base: markdownLanguage, codeLanguages: languages }),
     syntaxHighlighting(highlight),
@@ -368,8 +374,15 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     mathTooltip,
     chapterTemplate,
     chapterSectionBadges,
-    autocompletion({ override: [slashCompletions, citationCompletions, latexCompletions], icons: false }),
+    figureTools(),
+    autocompletion({ override: [slashCompletions, citationCompletions, crossRefCompletions, latexCompletions], icons: false }),
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
+    spellCheck,
+    grammarCheck,
+    editorModeExtension(),
+    showLatex,
+    comments,
+    trackChanges,
     onChange,
   ];
 }
@@ -379,5 +392,16 @@ export function bibExtensions(onChange: Extension): Extension[] {
 }
 
 export function texExtensions(): Extension[] {
-  return [...base(), EditorState.readOnly.of(true), markRegex(/\\[a-zA-Z@]+/g, "pf-attr"), markRegex(/\$[^$\n]+\$/g, "pf-math")];
+  return [
+    ...base(),
+    EditorState.readOnly.of(true),
+    markRegex(/\\[a-zA-Z@]+/g, "pf-attr"),
+    markRegex(/\$[^$\n]+\$/g, "pf-math"),
+    generatedNavigation,
+  ];
+}
+
+/** Hand-written LaTeX, such as the project's preamble.tex. */
+export function latexSourceExtensions(onChange: Extension): Extension[] {
+  return [...base(), markRegex(/\\[a-zA-Z@]+/g, "pf-attr"), markRegex(/\$[^$\n]+\$/g, "pf-math"), onChange];
 }

@@ -1,12 +1,24 @@
+import { isolateHistory } from "@codemirror/commands";
 import { setDiagnostics, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
-import { EditorSelection, EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState, type ChangeSpec, type Extension, type TransactionSpec } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { editorBridge } from "@/editor/bridge";
-import { bibExtensions, flashLine, markdownExtensions, syncChapterTemplate, texExtensions } from "@/editor/extensions";
+import { untracked } from "@/editor/changes/track";
+import {
+  bibExtensions,
+  flashLine,
+  latexSourceExtensions,
+  markdownExtensions,
+  syncChapterTemplate,
+  texExtensions,
+} from "@/editor/extensions";
+import { syncEditorMode } from "@/editor/livepreview";
+import { generatedLine } from "@/editor/livepreview/showlatex";
+import type { SourceSpot } from "@/lib/api";
 import { locate } from "@/lib/diagnostics";
-import { setBib, setPart } from "@/session";
-import { BIB_FILE, TEX_FILE, store, useStore, type EditorFile } from "@/store";
+import { setBib, setPart, setPreamble } from "@/session";
+import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, isPartFile, openFind, store, useStore, type EditorFile } from "@/store";
 
 type Contents = Map<EditorFile, string>;
 
@@ -14,7 +26,21 @@ function contents(s: ReturnType<typeof store.get>): Contents {
   const map: Contents = new Map(s.parts.map((p) => [p.file, p.content]));
   map.set(BIB_FILE, s.bib);
   map.set(TEX_FILE, s.tex);
+  if (s.preamble !== null) map.set(PREAMBLE_FILE, s.preamble);
   return map;
+}
+
+function storeText(file: EditorFile, text: string) {
+  if (file === BIB_FILE) setBib(text);
+  else if (file === PREAMBLE_FILE) setPreamble(text);
+  else if (file !== TEX_FILE) setPart(file, text);
+}
+
+function extensionsFor(file: EditorFile, onChange: Extension) {
+  if (file === BIB_FILE) return bibExtensions(onChange);
+  if (file === TEX_FILE) return texExtensions();
+  if (file === PREAMBLE_FILE) return latexSourceExtensions(onChange);
+  return markdownExtensions(onChange);
 }
 
 export function Editor() {
@@ -27,6 +53,8 @@ export function Editor() {
   const emitted = useRef(new Map<EditorFile, string>());
   /** Set while a change from outside the editor is applied, so it is not saved back. */
   const applyingExternal = useRef(false);
+  /** The Markdown cursor the generated LaTeX follows: the last part's, when the tab was left. */
+  const markdownSpot = useRef<SourceSpot | null>(null);
   const dir = useStore((s) => s.dir);
   const activeFile = useStore((s) => s.activeFile);
 
@@ -35,8 +63,7 @@ export function Editor() {
       if (u.docChanged && !applyingExternal.current) {
         const text = u.state.doc.toString();
         emitted.current.set(file, text);
-        if (file === BIB_FILE) setBib(text);
-        else if (file !== TEX_FILE) setPart(file, text);
+        storeText(file, text);
       }
       if (u.selectionSet || u.docChanged) {
         const head = u.state.selection.main.head;
@@ -44,9 +71,26 @@ export function Editor() {
         store.set({ cursor: { line: line.number, col: head - line.from + 1 } });
       }
     });
-    const extensions =
-      file === BIB_FILE ? bibExtensions(onChange) : file === TEX_FILE ? texExtensions() : markdownExtensions(onChange);
-    return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions });
+    return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions: extensionsFor(file, onChange) });
+  }
+
+  /** Edits a file through its own state, so Mod-Z in that file undoes the edit. */
+  function edit(file: EditorFile, changes: ChangeSpec) {
+    const text = contents(store.get()).get(file);
+    if (text === undefined || file === TEX_FILE) return;
+    const spec: TransactionSpec = { changes, userEvent: "input.replace", annotations: [isolateHistory.of("full"), untracked.of(true)] };
+    const view = viewRef.current;
+    if (view && file === current.current) {
+      view.dispatch(spec);
+      return;
+    }
+    let state = states.current.get(file);
+    if (!state || state.doc.toString() !== text) state = createState(file);
+    const next = state.update(spec).state;
+    states.current.set(file, next);
+    const value = next.doc.toString();
+    emitted.current.set(file, value);
+    storeText(file, value);
   }
 
   // One view per project; documents swap underneath it.
@@ -55,18 +99,33 @@ export function Editor() {
     states.current = new Map();
     scroll.current = new Map();
     emitted.current = new Map();
+    markdownSpot.current = null;
     const file = store.get().activeFile;
     current.current = file;
     const view = new EditorView({ state: createState(file), parent: host.current });
     viewRef.current = view;
     editorBridge.view = view;
+    editorBridge.edit = edit;
     view.focus();
     return () => {
       view.destroy();
       viewRef.current = null;
       editorBridge.view = null;
+      editorBridge.edit = null;
     };
   }, [dir]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey || e.key.toLowerCase() !== "f") return;
+      e.preventDefault();
+      const state = viewRef.current?.state;
+      const selected = state?.sliceDoc(state.selection.main.from, state.selection.main.to);
+      openFind(selected && !selected.includes("\n") ? selected : undefined);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Switch files, keeping each file's undo history and scroll position.
   useEffect(() => {
@@ -75,6 +134,9 @@ export function Editor() {
     if (contents(store.get()).has(current.current)) {
       states.current.set(current.current, view.state);
       scroll.current.set(current.current, view.scrollDOM.scrollTop);
+      if (isPartFile(current.current)) {
+        markdownSpot.current = { part: current.current, line: view.state.doc.lineAt(view.state.selection.main.head).number };
+      }
     }
     let next = states.current.get(activeFile);
     if (!next || (activeFile === TEX_FILE && next.doc.toString() !== store.get().tex)) {
@@ -82,10 +144,30 @@ export function Editor() {
     }
     view.setState(next);
     syncChapterTemplate(view);
+    syncEditorMode(view);
     current.current = activeFile;
-    requestAnimationFrame(() => (view.scrollDOM.scrollTop = scroll.current.get(activeFile) ?? 0));
+    requestAnimationFrame(() => {
+      if (activeFile !== TEX_FILE || !followMarkdown()) view.scrollDOM.scrollTop = scroll.current.get(activeFile) ?? 0;
+    });
     applyLint();
   }, [activeFile]);
+
+  /** Scrolls the generated LaTeX to the block of the Markdown cursor; false when it is not there. */
+  function followMarkdown(): boolean {
+    const view = viewRef.current;
+    const spot = markdownSpot.current;
+    if (!view || !spot || current.current !== TEX_FILE) return false;
+    const target = generatedLine(view.state.doc, spot.part, spot.line);
+    if (!target) return false;
+    const doc = view.state.doc;
+    const line = doc.line(target.line);
+    view.dispatch({
+      selection: EditorSelection.cursor(line.from),
+      effects: [EditorView.scrollIntoView(doc.line(target.marker).from, { y: "start", yMargin: 48 }), flashLine.of(line.from)],
+    });
+    setTimeout(() => viewRef.current?.dispatch({ effects: flashLine.of(null) }), 1300);
+    return true;
+  }
 
   // Content changed outside the editor: a structure command reloaded parts, the sidebar
   // inserted a bib entry, paper.tex was regenerated.
@@ -93,7 +175,8 @@ export function Editor() {
     () =>
       useStore.subscribe((s, prev) => {
         const view = viewRef.current;
-        if (!view || (s.parts === prev.parts && s.bib === prev.bib && s.tex === prev.tex)) return;
+        const unchanged = s.parts === prev.parts && s.bib === prev.bib && s.tex === prev.tex && s.preamble === prev.preamble;
+        if (!view || unchanged) return;
         const now = contents(s);
         const before = contents(prev);
         for (const file of before.keys()) if (!now.has(file)) states.current.delete(file);
@@ -109,6 +192,7 @@ export function Editor() {
             } finally {
               applyingExternal.current = false;
             }
+            if (file === TEX_FILE) followMarkdown();
           }
         }
       }),
@@ -142,6 +226,7 @@ export function Editor() {
     () =>
       useStore.subscribe((s, prev) => {
         if (s.meta?.template !== prev.meta?.template && viewRef.current) syncChapterTemplate(viewRef.current);
+        if (s.editorMode !== prev.editorMode && viewRef.current) syncEditorMode(viewRef.current);
       }),
     [],
   );
@@ -156,6 +241,16 @@ export function Editor() {
         requestAnimationFrame(() => {
           if (current.current !== jump.file) return;
           const doc = view.state.doc;
+          if (jump.select) {
+            const to = Math.min(jump.select.to, doc.length);
+            const from = Math.min(jump.select.from, to);
+            view.dispatch({
+              selection: EditorSelection.range(from, to),
+              effects: EditorView.scrollIntoView(from, { y: "center" }),
+            });
+            view.focus();
+            return;
+          }
           const line = doc.line(Math.min(Math.max(jump.line + 1, 1), doc.lines));
           view.dispatch({
             selection: EditorSelection.cursor(line.from),

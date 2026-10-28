@@ -4,8 +4,11 @@
 //! paper.json   metadata, template choice and the ordered list of Markdown parts
 //! sections/    the parts (chapters or sections) in Pandoc Markdown
 //! refs.bib     BibTeX references
+//! preamble.tex optional LaTeX added to the end of the generated preamble
+//! template/    optional copy of the template ("Eject template"), used instead of the built-in one
 //! figures/     images referenced from the parts
 //! .build/      generated paper.tex, part-*.tex fragments, paper.pdf and logs (safe to delete)
+//! .paperforge/ project settings kept with the paper, e.g. dictionary.txt (one word per line)
 //! ```
 
 use std::collections::HashSet;
@@ -15,7 +18,10 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compiler::{self, TEMPLATES, TEX_FILE};
+use crate::compiler::{self, TEMPLATE_PARTIALS, TEMPLATES, TEX_FILE};
+use crate::layout::Layout;
+use crate::markers;
+use crate::styles::Style;
 
 pub const META_FILE: &str = "paper.json";
 /// The single body file of projects created before documents had parts.
@@ -24,6 +30,10 @@ pub const SECTIONS_DIR: &str = "sections";
 pub const BIB_FILE: &str = "refs.bib";
 pub const FIGURES_DIR: &str = "figures";
 pub const BUILD_DIR: &str = ".build";
+pub const SETTINGS_DIR: &str = ".paperforge";
+pub const DICTIONARY_FILE: &str = "dictionary.txt";
+pub const PREAMBLE_FILE: &str = "preamble.tex";
+pub const TEMPLATE_DIR: &str = "template";
 
 const FIGURE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "pdf"];
 const SLUG_MAX_CHARS: usize = 48;
@@ -55,6 +65,15 @@ pub struct PaperMeta {
     pub lot: bool,
     /// Heading levels the printed table of contents shows, 1..=3.
     pub toc_depth: u8,
+    /// `\documentclass` options; each replaces the template's default of the same kind.
+    pub class_options: Vec<String>,
+    /// Project-relative copy of the template made by "Eject template"; empty for the built-in one.
+    pub template_file: String,
+    /// Page setup of the generic templates; journal templates ignore it.
+    pub layout: Layout,
+    /// Div and span classes typeset with the user's LaTeX.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<Style>,
 }
 
 impl Default for PaperMeta {
@@ -73,6 +92,10 @@ impl Default for PaperMeta {
             lof: false,
             lot: false,
             toc_depth: 2,
+            class_options: Vec::new(),
+            template_file: String::new(),
+            layout: Layout::default(),
+            styles: Vec::new(),
         }
     }
 }
@@ -92,6 +115,8 @@ pub struct ProjectSnapshot {
     pub parts: Vec<Part>,
     pub bib: String,
     pub figures: Vec<String>,
+    /// `preamble.tex`, absent until the user creates it.
+    pub preamble: Option<String>,
 }
 
 pub fn read_meta(dir: &Path) -> Result<PaperMeta, String> {
@@ -208,6 +233,7 @@ fn snapshot(dir: &Path, meta: PaperMeta) -> Result<ProjectSnapshot, String> {
         parts,
         bib: read_optional(&dir.join(BIB_FILE))?,
         figures: list_figures(dir),
+        preamble: read_preamble(dir)?,
     })
 }
 
@@ -275,12 +301,14 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `parts` is owned by the part commands: a meta saved from a stale editor state must not drop
-/// or revive parts.
+/// `parts` and `template_file` are owned by the part and template commands: a meta saved from a
+/// stale editor state must not drop or revive them. Picking another template leaves the ejected
+/// copy, which belongs to the previous one.
 pub fn save(dir: &Path, meta: Option<&PaperMeta>, bib: Option<&str>) -> Result<(), String> {
     if let Some(meta) = meta {
-        let parts = read_meta(dir)?.parts;
-        write_meta(dir, &PaperMeta { parts, ..meta.clone() })?;
+        let stored = read_meta(dir)?;
+        let template_file = if stored.template == meta.template { stored.template_file } else { String::new() };
+        write_meta(dir, &PaperMeta { parts: stored.parts, template_file, ..meta.clone() })?;
     }
     if let Some(bib) = bib {
         write_atomic(&dir.join(BIB_FILE), bib.as_bytes())?;
@@ -496,6 +524,22 @@ fn fold_accent(c: char) -> char {
 /// Copies an image into `figures/` under a unique, LaTeX-safe name and returns its
 /// project-relative path.
 pub fn import_figure(dir: &Path, source: &Path) -> Result<String, String> {
+    let name = unused_figure_name(dir, source)?;
+    fs::copy(source, dir.join(&name)).map_err(|e| format!("{}: {e}", source.display()))?;
+    Ok(name)
+}
+
+/// Like `import_figure`, for bytes without a file on disk (a pasted image). `data` is base64.
+pub fn import_figure_bytes(dir: &Path, name: &str, data: &str) -> Result<String, String> {
+    let source = Path::new(name);
+    let name = unused_figure_name(dir, source)?;
+    let bytes = decode_base64(data).ok_or("The pasted figure is not valid base64")?;
+    write_atomic(&dir.join(&name), &bytes)?;
+    Ok(name)
+}
+
+/// A free `figures/<stem>.<ext>` for `source`, with `figures/` created.
+fn unused_figure_name(dir: &Path, source: &Path) -> Result<String, String> {
     if !is_figure(source) {
         return Err(format!(
             "Unsupported figure type {}: use {}",
@@ -513,8 +557,30 @@ pub fn import_figure(dir: &Path, source: &Path) -> Result<String, String> {
         name = format!("{stem}-{n}.{ext}");
         n += 1;
     }
-    fs::copy(source, figures.join(&name)).map_err(|e| format!("{}: {e}", source.display()))?;
     Ok(format!("{FIGURES_DIR}/{name}"))
+}
+
+/// Standard base64 with optional padding; whitespace is ignored.
+fn decode_base64(data: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in data.bytes().filter(|c| !c.is_ascii_whitespace()).take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Spaces, `#`, `%` and non-ASCII characters break `\includegraphics`, so keep `[a-z0-9-_]`.
@@ -550,7 +616,8 @@ pub fn export_zip(dir: &Path, dest: &Path) -> Result<(), String> {
     add(TEX_FILE, compiler::without_includeonly(&tex).as_bytes())?;
     for name in tex.lines().filter_map(compiler::included_fragment) {
         let fragment = format!("{name}.tex");
-        add(&fragment, &read(&build.join(&fragment))?)?;
+        let text = String::from_utf8_lossy(&read(&build.join(&fragment))?).into_owned();
+        add(&fragment, markers::strip_markers(&text).as_bytes())?;
     }
     let bib = dir.join(BIB_FILE);
     if bib.exists() {
@@ -561,6 +628,134 @@ pub fn export_zip(dir: &Path, dest: &Path) -> Result<(), String> {
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn require_project(dir: &Path) -> Result<(), String> {
+    if dir.join(META_FILE).is_file() {
+        Ok(())
+    } else {
+        Err(format!("{} is not a PaperForge project (no {META_FILE})", dir.display()))
+    }
+}
+
+/// `rel` below `dir` with every component a plain name and none of them a link, which could
+/// point outside the project.
+fn inside_project(dir: &Path, rel: &str) -> Result<PathBuf, String> {
+    let path = Path::new(rel);
+    if rel.is_empty() || rel.contains('\\') || !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(format!("'{rel}' is not a path inside the project"));
+    }
+    let mut at = dir.to_path_buf();
+    for component in path.components() {
+        at.push(component);
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("{} is a link out of the project", at.display()));
+        }
+    }
+    Ok(at)
+}
+
+/// `.paperforge/dictionary.txt` of a project.
+fn dictionary_path(dir: &Path) -> Result<PathBuf, String> {
+    require_project(dir)?;
+    inside_project(dir, &format!("{SETTINGS_DIR}/{DICTIONARY_FILE}"))
+}
+
+/// A linked preamble (macros shared by several papers) is read, but never written through.
+pub fn read_preamble(dir: &Path) -> Result<Option<String>, String> {
+    let path = dir.join(PREAMBLE_FILE);
+    match fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+pub fn save_preamble(dir: &Path, content: &str) -> Result<(), String> {
+    require_project(dir)?;
+    write_atomic(&inside_project(dir, PREAMBLE_FILE)?, content.as_bytes())
+}
+
+/// The ejected template a meta points at, checked to be a `.tex` file inside the project.
+pub fn template_file_path(dir: &Path, file: &str) -> Result<PathBuf, String> {
+    let path = inside_project(dir, file)?;
+    if Path::new(file).extension().is_none_or(|e| e != "tex") || !path.is_file() {
+        return Err(format!("The project template '{file}' is missing; restore the built-in template"));
+    }
+    Ok(path)
+}
+
+/// Copies the current built-in template and its partials into `template/`, and compiles with that
+/// copy from now on. Files already there (from an earlier eject) are kept, with their edits.
+pub fn eject_template(dir: &Path, templates: &Path) -> Result<ProjectSnapshot, String> {
+    let mut meta = read_meta(dir)?;
+    if !TEMPLATES.contains(&meta.template.as_str()) {
+        return Err(format!("Unknown template '{}'", meta.template));
+    }
+    let main = format!("{}.tex", meta.template);
+    let target = inside_project(dir, TEMPLATE_DIR)?;
+    fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    for name in std::iter::once(main.as_str()).chain(TEMPLATE_PARTIALS) {
+        let dest = inside_project(dir, &format!("{TEMPLATE_DIR}/{name}"))?;
+        if !dest.exists() {
+            let source = templates.join(name);
+            fs::copy(&source, &dest).map_err(|e| format!("{}: {e}", source.display()))?;
+        }
+    }
+    meta.template_file = format!("{TEMPLATE_DIR}/{main}");
+    write_meta(dir, &meta)?;
+    snapshot(dir, meta)
+}
+
+/// Compiles with the built-in template again; the ejected copy stays on disk.
+pub fn restore_template(dir: &Path) -> Result<ProjectSnapshot, String> {
+    let mut meta = read_meta(dir)?;
+    meta.template_file.clear();
+    write_meta(dir, &meta)?;
+    snapshot(dir, meta)
+}
+
+/// Non-empty trimmed lines, first occurrence only.
+fn dictionary_words(raw: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw.lines()
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && seen.insert(*w))
+        .map(String::from)
+        .collect()
+}
+
+/// The project's own words for the spell checker.
+pub fn read_dictionary(dir: &Path) -> Result<Vec<String>, String> {
+    Ok(dictionary_words(&read_optional(&dictionary_path(dir)?)?))
+}
+
+/// Appends the words the project dictionary does not have yet and returns the whole list.
+pub fn add_to_dictionary(dir: &Path, words: &[String]) -> Result<Vec<String>, String> {
+    let path = dictionary_path(dir)?;
+    let mut raw = read_optional(&path)?;
+    let mut known = dictionary_words(&raw);
+    let mut added = String::new();
+    for word in words.iter().map(|w| w.trim()) {
+        if word.is_empty() || word.contains(|c: char| c.is_whitespace() || c.is_control()) {
+            return Err(format!("'{word}' is not a single word"));
+        }
+        if !known.iter().any(|k| k == word) {
+            known.push(word.to_string());
+            added.push_str(word);
+            added.push('\n');
+        }
+    }
+    if added.is_empty() {
+        return Ok(known);
+    }
+    fs::create_dir_all(dir.join(SETTINGS_DIR)).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        raw.push('\n');
+    }
+    raw.push_str(&added);
+    write_atomic(&path, raw.as_bytes())?;
+    Ok(known)
 }
 
 #[cfg(test)]
@@ -784,6 +979,41 @@ mod tests {
     }
 
     #[test]
+    fn import_figure_bytes_sanitizes_deduplicates_and_decodes() {
+        let tmp = blank();
+        let first = import_figure_bytes(tmp.path(), "Screen Shot #2.PNG", "iVBORw0KGgo=").unwrap();
+        assert_eq!(first, "figures/screen-shot--2.png");
+        assert_eq!(fs::read(tmp.path().join(&first)).unwrap(), b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            import_figure_bytes(tmp.path(), "Screen Shot #2.PNG", "aGk").unwrap(),
+            "figures/screen-shot--2-2.png"
+        );
+        assert_eq!(fs::read(tmp.path().join("figures/screen-shot--2-2.png")).unwrap(), b"hi");
+        assert_eq!(import_figure_bytes(tmp.path(), "../../évil.pdf", "").unwrap(), "figures/vil.pdf");
+        assert_eq!(list_figures(tmp.path()).len(), 3);
+    }
+
+    #[test]
+    fn import_figure_bytes_rejects_bad_types_and_data() {
+        let tmp = blank();
+        for name in ["diagram.svg", "anim.gif", "no-extension"] {
+            assert!(import_figure_bytes(tmp.path(), name, "aGk=").unwrap_err().contains("Unsupported"));
+        }
+        assert!(import_figure_bytes(tmp.path(), "x.png", "not base64!").is_err());
+        assert!(list_figures(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn base64_decodes_every_padding_length() {
+        assert_eq!(decode_base64("").unwrap(), b"");
+        assert_eq!(decode_base64("Zg==").unwrap(), b"f");
+        assert_eq!(decode_base64("Zm8=").unwrap(), b"fo");
+        assert_eq!(decode_base64("Zm9v").unwrap(), b"foo");
+        assert_eq!(decode_base64("Zm9v\nYmFy").unwrap(), b"foobar");
+        assert_eq!(decode_base64("+/+/").unwrap(), [0xfb, 0xff, 0xbf]);
+    }
+
+    #[test]
     fn meta_reads_partial_json_with_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join(META_FILE), r#"{"title":"Only title"}"#).unwrap();
@@ -792,5 +1022,212 @@ mod tests {
         assert_eq!(meta.template, "article");
         assert_eq!(meta.toc_depth, 2);
         assert!(meta.parts.is_empty() && !meta.toc);
+        assert!(meta.class_options.is_empty() && meta.template_file.is_empty());
+        assert_eq!(meta.layout, Layout::default());
+        assert!(meta.styles.is_empty());
+    }
+
+    #[test]
+    fn meta_round_trips_the_layout() {
+        use crate::layout::{LineSpacing, MainFont, Unit};
+        let tmp = blank();
+        let mut meta = read_meta(tmp.path()).unwrap();
+        meta.layout.margins.unit = Unit::In;
+        meta.layout.margins.left = 1.25;
+        meta.layout.line_spacing = LineSpacing::Double;
+        meta.layout.font = MainFont::Libertine;
+        meta.layout.header.center = "Draft {page}".into();
+        meta.layout.line_numbers = true;
+        save(tmp.path(), Some(&meta), None).unwrap();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(raw.contains("\"layout\"") && raw.contains("\"lineSpacing\": \"double\""), "{raw}");
+        assert_eq!(read_meta(tmp.path()).unwrap(), meta);
+
+        fs::write(tmp.path().join(META_FILE), r#"{"layout":{"lineNumbers":true}}"#).unwrap();
+        let partial = read_meta(tmp.path()).unwrap().layout;
+        assert!(partial.line_numbers);
+        assert_eq!(partial.margins, Layout::default().margins);
+        fs::write(tmp.path().join(META_FILE), r#"{"layout":{"lineSpacing":"triple"}}"#).unwrap();
+        assert!(read_meta(tmp.path()).unwrap_err().contains("triple"));
+    }
+
+    #[test]
+    fn meta_round_trips_styles() {
+        use crate::styles::StyleKind;
+        let tmp = blank();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(!raw.contains("\"styles\""), "a project without styles does not list them: {raw}");
+        let mut meta = read_meta(tmp.path()).unwrap();
+        meta.styles = vec![
+            Style { name: "note".into(), kind: StyleKind::Paragraph, latex: "\\begin{quote}#1\\end{quote}".into() },
+            Style { name: "smallcaps".into(), kind: StyleKind::Character, latex: "\\textsc{#1}".into() },
+        ];
+        write_meta(tmp.path(), &meta).unwrap();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(raw.contains("\"kind\": \"paragraph\"") && raw.contains("\"kind\": \"character\""), "{raw}");
+        assert_eq!(read_meta(tmp.path()).unwrap(), meta);
+    }
+
+    #[test]
+    fn meta_round_trips_class_options_and_template_file() {
+        let tmp = blank();
+        let mut meta = read_meta(tmp.path()).unwrap();
+        meta.class_options = vec!["twocolumn".into(), "10pt".into()];
+        meta.template_file = "template/article.tex".into();
+        write_meta(tmp.path(), &meta).unwrap();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(raw.contains("\"classOptions\"") && raw.contains("\"templateFile\""), "{raw}");
+        assert_eq!(read_meta(tmp.path()).unwrap(), meta);
+    }
+
+    fn built_in_templates() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/templates")
+    }
+
+    #[test]
+    fn save_keeps_the_ejected_template_until_the_template_changes() {
+        let tmp = blank();
+        eject_template(tmp.path(), &built_in_templates()).unwrap();
+        let stale = PaperMeta { title: "New".into(), ..PaperMeta::default() };
+        save(tmp.path(), Some(&stale), None).unwrap();
+        let meta = read_meta(tmp.path()).unwrap();
+        assert_eq!((meta.title.as_str(), meta.template_file.as_str()), ("New", "template/article.tex"));
+
+        let report = PaperMeta { template: "report".into(), template_file: "template/article.tex".into(), ..meta };
+        save(tmp.path(), Some(&report), None).unwrap();
+        assert_eq!(read_meta(tmp.path()).unwrap().template_file, "");
+    }
+
+    #[test]
+    fn eject_copies_the_template_and_keeps_earlier_edits() {
+        let tmp = blank();
+        let s = eject_template(tmp.path(), &built_in_templates()).unwrap();
+        assert_eq!(s.meta.template_file, "template/article.tex");
+        for name in ["article.tex", "common.tex", "contents.tex"] {
+            let copied = fs::read(tmp.path().join(TEMPLATE_DIR).join(name)).unwrap();
+            assert_eq!(copied, fs::read(built_in_templates().join(name)).unwrap(), "{name}");
+        }
+        assert!(!tmp.path().join(TEMPLATE_DIR).join("paper.lua").exists());
+        assert!(template_file_path(tmp.path(), &s.meta.template_file).is_ok());
+
+        let restored = restore_template(tmp.path()).unwrap();
+        assert_eq!(restored.meta.template_file, "");
+        let edited = tmp.path().join(TEMPLATE_DIR).join("article.tex");
+        fs::write(&edited, "% mine\n").unwrap();
+        eject_template(tmp.path(), &built_in_templates()).unwrap();
+        assert_eq!(fs::read_to_string(&edited).unwrap(), "% mine\n");
+    }
+
+    #[test]
+    fn template_file_must_be_a_tex_file_inside_the_project() {
+        let tmp = blank();
+        eject_template(tmp.path(), &built_in_templates()).unwrap();
+        fs::write(tmp.path().join("notes.txt"), "x").unwrap();
+        for bad in ["../article.tex", "/etc/article.tex", "template/../../x.tex", "template\\article.tex", "", "notes.txt"] {
+            assert!(template_file_path(tmp.path(), bad).is_err(), "{bad:?}");
+        }
+        assert!(template_file_path(tmp.path(), "template/missing.tex").unwrap_err().contains("restore"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn template_and_preamble_refuse_links_out_of_the_project() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("article.tex"), "x").unwrap();
+        fs::write(outside.path().join(PREAMBLE_FILE), "\\newcommand\\shared{S}\n").unwrap();
+
+        let tmp = blank();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join(TEMPLATE_DIR)).unwrap();
+        assert!(template_file_path(tmp.path(), "template/article.tex").is_err());
+        assert!(eject_template(tmp.path(), &built_in_templates()).is_err());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 2);
+
+        std::os::unix::fs::symlink(outside.path().join(PREAMBLE_FILE), tmp.path().join(PREAMBLE_FILE)).unwrap();
+        assert_eq!(read_preamble(tmp.path()).unwrap().as_deref(), Some("\\newcommand\\shared{S}\n"));
+        assert!(save_preamble(tmp.path(), "x").is_err());
+        assert_eq!(fs::read_to_string(outside.path().join(PREAMBLE_FILE)).unwrap(), "\\newcommand\\shared{S}\n");
+    }
+
+    #[test]
+    fn preamble_is_optional_and_saved_in_the_project() {
+        let tmp = blank();
+        assert_eq!(open(tmp.path()).unwrap().preamble, None);
+        save_preamble(tmp.path(), "\\usepackage{xspace}\n").unwrap();
+        assert_eq!(open(tmp.path()).unwrap().preamble.as_deref(), Some("\\usepackage{xspace}\n"));
+        assert!(save_preamble(tempfile::tempdir().unwrap().path(), "x").is_err());
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn dictionary_appends_new_words_once() {
+        let tmp = blank();
+        assert!(read_dictionary(tmp.path()).unwrap().is_empty());
+        assert!(!tmp.path().join(SETTINGS_DIR).exists());
+
+        let list = add_to_dictionary(tmp.path(), &words(&["PaperForge", " Tectonic ", "PaperForge"])).unwrap();
+        assert_eq!(list, ["PaperForge", "Tectonic"]);
+        let path = tmp.path().join(SETTINGS_DIR).join(DICTIONARY_FILE);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "PaperForge\nTectonic\n");
+
+        fs::write(&path, "Pandoc\n\n  Pandoc\nLaTeX").unwrap();
+        let list = add_to_dictionary(tmp.path(), &words(&["latex", "LaTeX"])).unwrap();
+        assert_eq!(list, ["Pandoc", "LaTeX", "latex"]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Pandoc\n\n  Pandoc\nLaTeX\nlatex\n");
+        assert_eq!(read_dictionary(tmp.path()).unwrap(), ["Pandoc", "LaTeX", "latex"]);
+    }
+
+    #[test]
+    fn dictionary_rejects_non_words_and_non_projects() {
+        let tmp = blank();
+        for bad in ["two words", "line\nbreak", "", "tab\there"] {
+            assert!(add_to_dictionary(tmp.path(), &words(&[bad])).is_err(), "{bad:?}");
+        }
+        assert!(read_dictionary(tmp.path()).unwrap().is_empty());
+        let plain = tempfile::tempdir().unwrap();
+        assert!(read_dictionary(plain.path()).is_err());
+        assert!(add_to_dictionary(plain.path(), &words(&["word"])).is_err());
+        assert!(!plain.path().join(SETTINGS_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dictionary_refuses_links_out_of_the_project() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join(DICTIONARY_FILE), "secret\n").unwrap();
+
+        let tmp = blank();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join(SETTINGS_DIR)).unwrap();
+        assert!(read_dictionary(tmp.path()).is_err());
+        assert!(add_to_dictionary(tmp.path(), &words(&["word"])).is_err());
+
+        let tmp = blank();
+        fs::create_dir(tmp.path().join(SETTINGS_DIR)).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join(DICTIONARY_FILE),
+            tmp.path().join(SETTINGS_DIR).join(DICTIONARY_FILE),
+        )
+        .unwrap();
+        assert!(read_dictionary(tmp.path()).is_err());
+        assert!(add_to_dictionary(tmp.path(), &words(&["word"])).is_err());
+        assert_eq!(fs::read_to_string(outside.path().join(DICTIONARY_FILE)).unwrap(), "secret\n");
+    }
+
+    #[test]
+    fn exported_fragments_have_no_block_markers() {
+        use std::io::Read;
+        let tmp = blank();
+        let build = build_dir(tmp.path());
+        fs::create_dir_all(&build).unwrap();
+        fs::write(build.join(TEX_FILE), "\\begin{document}\n\\input{part-a}\n\\end{document}\n").unwrap();
+        fs::write(build.join("part-a.tex"), "%PF:1\n\n\\section{A}\n\n%PF:3\n\nText.\n").unwrap();
+        let dest = tmp.path().join("out.zip");
+        export_zip(tmp.path(), &dest).unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(&dest).unwrap()).unwrap();
+        let mut fragment = String::new();
+        archive.by_name("part-a.tex").unwrap().read_to_string(&mut fragment).unwrap();
+        assert_eq!(fragment, "\\section{A}\n\nText.\n");
     }
 }

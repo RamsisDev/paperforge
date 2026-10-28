@@ -1,0 +1,59 @@
+:root {
+  --pf-insertion: #0b5cc5;
+  --pf-deletion: #c41e3a;
+}
+
+.dark {
+  --pf-insertion: #6cb2ff;
+  --pf-deletion: #ff7b8a;
+}
+
+.pf-insertion {
+  color: var(--pf-insertion);
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2px;
+}
+
+.pf-deletion {
+  color: var(--pf-deletion);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+/* The grammar reads `[text]` as a link; in Writing mode the changed text keeps the change color. */
+.pf-writing .pf-insertion,
+.pf-writing .pf-insertion > span:not(.pf-lp-chip):not(.pf-lp-math) {
+  color: var(--pf-insertion);
+}
+
+.pf-writing .pf-deletion,
+.pf-writing .pf-deletion > span:not(.pf-lp-chip):not(.pf-lp-math) {
+  color: var(--pf-deletion);
+}
+
+.pf-change-tip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.pf-change-tip-label {
+  margin-right: 4px;
+  color: var(--pf-muted);
+}
+
+.pf-change-tip-button {
+  padding: 1px 6px;
+  border: 1px solid var(--pf-line);
+  border-radius: 4px;
+  background: var(--pf-panel);
+  color: var(--pf-fg);
+  cursor: default;
+}
+
+.pf-change-tip-button:hover {
+  background: var(--pf-raised);
+}

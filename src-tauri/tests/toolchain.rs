@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
+use paperforge_lib::backend::Backend;
 use paperforge_lib::compiler::{self, CompileMode, CompileOutcome, Severity, TEMPLATES, Toolchain};
+use paperforge_lib::layout::{Layout, LineSpacing, MainFont, Margins, Slots, Unit};
 use paperforge_lib::project;
 
 const INTRO: &str = "sections/introduction.md";
@@ -52,7 +54,7 @@ fn update_meta(dir: &Path, edit: impl FnOnce(&mut project::PaperMeta)) {
 }
 
 async fn compile(dir: &Path, mode: CompileMode, focus: Option<&str>) -> CompileOutcome {
-    compiler::compile(&toolchain(), dir, mode, focus).await.unwrap()
+    compiler::compile(&toolchain(), dir, mode, focus, false).await.unwrap()
 }
 
 fn errors(outcome: &CompileOutcome) -> Vec<&compiler::Diagnostic> {
@@ -271,8 +273,32 @@ async fn exported_zip_compiles_from_its_root() {
     assert!(status.success());
     assert!(out.path().join("paper.pdf").exists());
 
-    let flat = compiler::flatten_tex(&project::build_dir(tmp.path())).await.unwrap();
+    for name in ["paper.tex", "part-sections-method.tex"] {
+        let text = std::fs::read_to_string(out.path().join(name)).unwrap();
+        assert!(!text.contains("%PF"), "{name} keeps block markers");
+    }
+
+    let flat = compiler::flatten_tex(tmp.path()).await.unwrap();
     assert!(!flat.contains("\\include{") && flat.contains("\\chapter{Method}"), "{flat}");
+    assert!(flat.contains(&format!("{}{METHOD}\n%PF:1\n", compiler::PART_START)), "{flat}");
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn block_latex_shows_the_equation_of_a_display_math_block() {
+    let tmp = sample_project("article", "");
+    assert!(compile(tmp.path(), CompileMode::Preview, None).await.ok);
+    let markdown = std::fs::read_to_string(tmp.path().join(METHOD)).unwrap();
+    let line = markdown.lines().position(|l| l.contains("{#eq:entropy}")).unwrap() + 1;
+    let block = paperforge_lib::showlatex::block_latex(tmp.path(), METHOD, line, None).await.unwrap().unwrap();
+    assert!(!block.stale);
+    assert!(block.latex.contains("\\begin{equation}") && block.latex.contains("\\label{eq:entropy}"), "{block:?}");
+    assert!(block.markdown_from <= line && block.markdown_to >= line, "{block:?}");
+    println!("block_latex for {METHOD}:{line}: {:?}", block.latex);
+
+    edit_part(tmp.path(), METHOD, |c| c.replacen("Inline math", "Edited inline math", 1));
+    let block = paperforge_lib::showlatex::block_latex(tmp.path(), METHOD, line, None).await.unwrap().unwrap();
+    assert!(block.stale);
 }
 
 /// The app aborts a running compile when the user keeps typing; the abort must kill TeX and
@@ -285,7 +311,7 @@ async fn aborted_compile_kills_tex_and_leaves_a_usable_build() {
 
     let dir = tmp.path().to_path_buf();
     let tc2 = tc.clone();
-    let task = tokio::spawn(async move { compiler::compile(&tc2, &dir, CompileMode::Full, None).await });
+    let task = tokio::spawn(async move { compiler::compile(&tc2, &dir, CompileMode::Full, None, false).await });
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
@@ -368,6 +394,7 @@ async fn latex_errors_point_at_the_fragment_line() {
         assert_eq!(error.file.as_deref(), Some("part-sections-introduction.tex"), "{error:?}");
         assert_eq!(error.part.as_deref(), Some(INTRO), "{error:?}");
         assert!(error.source.as_deref().unwrap().contains("\\undefinedmacro"), "{error:?}");
+        assert_eq!(error.part_line, Some(3), "{error:?}");
 
         project::save_part(tmp.path(), INTRO, "# Intro\n\nFixed, see @fig:nope.\n").unwrap();
         let fixed = compile(tmp.path(), CompileMode::Preview, None).await;
@@ -376,5 +403,340 @@ async fn latex_errors_point_at_the_fragment_line() {
         assert_eq!(warning.file.as_deref(), Some("part-sections-introduction.tex"), "{warning:?}");
         assert_eq!(warning.part.as_deref(), Some(INTRO), "{warning:?}");
         assert!(warning.source.as_deref().unwrap().contains("\\ref{fig:nope}"), "{warning:?}");
+        assert_eq!(warning.part_line, Some(3), "{warning:?}");
+    }
+}
+
+fn main_tex(dir: &Path) -> String {
+    std::fs::read_to_string(project::build_dir(dir).join("paper.tex")).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn project_preamble_and_class_options_apply() {
+    for (template, class) in [("article", "\\documentclass[a4paper,10pt,twocolumn]{article}"), ("ieee", "\\documentclass[conference,10pt,twocolumn]{IEEEtran}")] {
+        let tmp = sample_project(template, "");
+        project::save_preamble(tmp.path(), "\\newcommand\\pfname{PaperForge}\n").unwrap();
+        edit_part(tmp.path(), INTRO, |c| c.replace("Cite with", "\\pfname{} lets you cite with"));
+        update_meta(tmp.path(), |m| m.class_options = vec!["10pt".into(), "twocolumn".into()]);
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        let tex = main_tex(tmp.path());
+        assert!(tex.starts_with(class), "{template}: {}", tex.lines().next().unwrap());
+        assert!(tex.contains("\\newcommand\\pfname{PaperForge}"));
+
+        project::save_preamble(tmp.path(), "").unwrap();
+        let broken = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(!broken.ok, "{template}: a removed macro must break the next compile");
+        assert!(errors(&broken)[0].message.contains("Undefined control sequence"), "{:#?}", errors(&broken));
+    }
+}
+
+fn page_setup(font: MainFont, line_numbers: bool) -> Layout {
+    Layout {
+        margins: Margins { unit: Unit::In, top: 1.0, bottom: 1.0, left: 0.75, right: 0.75 },
+        line_spacing: LineSpacing::Onehalf,
+        font,
+        header: Slots { left: "PaperForge & co.".into(), right: "Draft".into(), ..Slots::default() },
+        footer: Slots { center: "Page {page}".into(), ..Slots::default() },
+        line_numbers,
+    }
+}
+
+/// `[0 0 612 792]`: the first `/MediaBox` of the PDF, in points. xdvipdfmx puts the page
+/// dictionaries in compressed object streams, so every stream is inflated too.
+fn media_box(dir: &Path) -> String {
+    use std::io::Read;
+    let pdf = std::fs::read(project::build_dir(dir).join("paper.pdf")).unwrap();
+    let mut text = String::from_utf8_lossy(&pdf).into_owned();
+    let mut rest = pdf.as_slice();
+    while let Some(at) = rest.windows(7).position(|w| w == b"stream\n" || w == b"stream\r") {
+        rest = &rest[at + 7..];
+        rest = rest.strip_prefix(b"\n").unwrap_or(rest);
+        let mut inflated = Vec::new();
+        if flate2::read::ZlibDecoder::new(rest).read_to_end(&mut inflated).is_ok() {
+            text.push_str(&String::from_utf8_lossy(&inflated));
+        }
+    }
+    let start = text.find("/MediaBox").expect("a MediaBox") + "/MediaBox".len();
+    let end = start + text[start..].find(']').unwrap() + 1;
+    text[start..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// setspace and lineno are not in the seeded cache: the first run of this test downloads them.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain; may download packages"]
+async fn page_setup_applies_to_generic_templates() {
+    for (template, font, line_numbers) in [("article", MainFont::Termes, true), ("report", MainFont::Libertine, false)] {
+        let tmp = sample_project(template, "");
+        update_meta(tmp.path(), |m| {
+            m.class_options = vec!["letterpaper".into(), "twocolumn".into()];
+            m.layout = page_setup(font, line_numbers);
+        });
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        let tex = main_tex(tmp.path());
+        let class = tex.lines().next().unwrap();
+        assert!(class.contains("letterpaper") && class.contains("twocolumn") && !class.contains("a4paper"), "{class}");
+        for expected in [
+            "\\usepackage[top=1in,bottom=1in,left=0.75in,right=0.75in]{geometry}",
+            "\\usepackage[onehalfspacing]{setspace}",
+            "\\fancyhead[L]{PaperForge \\& co.}",
+            "\\fancyfoot[C]{Page \\thepage{}}",
+        ] {
+            assert!(tex.contains(expected), "{template}: {expected}");
+        }
+        assert_eq!(tex.contains("\\linenumbers"), line_numbers, "{template}");
+        assert_eq!(media_box(tmp.path()), "[0 0 612 792]", "{template}");
+        let headheight = outcome.diagnostics.iter().find(|d| d.message.contains("headheight"));
+        assert!(headheight.is_none(), "{template}: {headheight:?}");
+        println!(
+            "{template:<8} letter, two columns, 1.5 spacing, header/footer, {font:?}, line numbers {line_numbers}: \
+             tex {:>5} ms  pages {:>2}  network={}",
+            outcome.tex_ms,
+            page_count(tmp.path()),
+            outcome.used_network
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn journal_templates_ignore_the_page_setup() {
+    let tmp = sample_project("ieee", "");
+    assert!(compile(tmp.path(), CompileMode::Full, None).await.ok);
+    let before = main_tex(tmp.path());
+    update_meta(tmp.path(), |m| m.layout = page_setup(MainFont::Libertine, true));
+    let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+    assert!(outcome.ok, "{:#?}", errors(&outcome));
+    assert_eq!(main_tex(tmp.path()), before);
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn paragraph_and_character_styles_compile() {
+    let builtin: Vec<paperforge_lib::styles::Style> =
+        serde_json::from_str(include_str!("../../src/lib/builtinStyles.json")).unwrap();
+    for template in ["article", "ieee"] {
+        let tmp = sample_project(template, "");
+        edit_part(tmp.path(), INTRO, |c| {
+            let mut c = c.replace("information can be measured", "[information]{.smallcaps} can be [measured]{.highlight}");
+            for style in builtin.iter().filter(|s| s.kind == paperforge_lib::styles::StyleKind::Paragraph) {
+                c.push_str(&format!("\n::: {{.{}}}\nA *styled* paragraph with [a keyword]{{.keyword}}.\n\nAnd a second one.\n:::\n", style.name));
+            }
+            c
+        });
+        update_meta(tmp.path(), |m| m.styles = builtin.clone());
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(!outcome.used_network, "{template}: the built-in styles only use cached packages");
+        let fragment = std::fs::read_to_string(project::build_dir(tmp.path()).join("part-sections-introduction.tex")).unwrap();
+        for expected in ["\\begin{pf-note}", "\\end{pf-pull-quote}", "\\pfstylesmallcaps{information}", "\\pfstylehighlight{measured}", "\\pfstylekeyword{a keyword}"] {
+            assert!(fragment.contains(expected), "{template}: {expected} in\n{fragment}");
+        }
+        let tex = main_tex(tmp.path());
+        assert!(tex.contains("\\newenvironment{pf-note}") && tex.contains("\\newcommand{\\pfstylesmallcaps}[1]{\\textsc{#1}}"));
+
+        update_meta(tmp.path(), |m| m.styles.retain(|s| s.name != "note"));
+        let missing = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(missing.ok, "{template}: an unknown class is a plain div: {:#?}", errors(&missing));
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn ejected_template_compiles_and_restores() {
+    let tc = toolchain();
+    for template in ["article", "report"] {
+        let tmp = sample_project(template, "");
+        assert!(compile(tmp.path(), CompileMode::Full, None).await.ok);
+
+        let meta = project::eject_template(tmp.path(), &tc.templates).unwrap().meta;
+        let local = tmp.path().join(&meta.template_file);
+        let text = std::fs::read_to_string(&local).unwrap();
+        std::fs::write(&local, text.replace("\\begin{document}", "\\newcommand\\pfejected{Ejected}\n\\begin{document}")).unwrap();
+        edit_part(tmp.path(), INTRO, |c| c.replace("Cite with", "\\pfejected{} cite with"));
+        update_meta(tmp.path(), |m| m.class_options = vec!["draft".into()]);
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        let tex = main_tex(tmp.path());
+        assert!(tex.contains("\\pfejected") && tex.lines().next().unwrap().contains("draft"), "{template}");
+
+        project::restore_template(tmp.path()).unwrap();
+        let restored = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(!restored.ok, "{template}: the built-in template lacks the ejected macro");
+        assert!(!main_tex(tmp.path()).contains("\\pfejected"));
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn sample_labels_get_their_numbers_and_pages() {
+    for template in ["article", "report"] {
+        let tmp = sample_project(template, "");
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        for key in ["fig:example", "tbl:results", "eq:entropy", "sec:method"] {
+            let label = outcome.labels.get(key).unwrap_or_else(|| panic!("{template}: no {key}: {:#?}", outcome.labels));
+            assert!(
+                label.number.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "{template} {key}: {label:?}"
+            );
+            assert!(label.page.parse::<u32>().is_ok_and(|p| p >= 1), "{template} {key}: {label:?}");
+            println!("{template:<8} {key:<12} {:<4} p. {}", label.number, label.page);
+        }
+        if template == "report" {
+            assert_eq!(outcome.labels["sec:method"].number, "2", "{:#?}", outcome.labels);
+            assert!(outcome.labels["fig:example"].number.starts_with("2."), "{:#?}", outcome.labels);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn synctex_links_markdown_lines_and_pdf_spots_both_ways() {
+    for template in ["article", "report"] {
+        let tmp = sample_project(template, "");
+        let outcome = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        let backend = Backend::new(toolchain(), None, manifest().join("resources/sample"));
+        let dir = tmp.path().to_str().unwrap();
+        for (part, text) in [(INTRO, "Cite with"), (METHOD, "Inline math works"), (METHOD, "Raw LaTeX passes")] {
+            let markdown = std::fs::read_to_string(tmp.path().join(part)).unwrap();
+            let line = markdown.lines().position(|l| l.contains(text)).unwrap() + 1;
+            let spot = backend.synctex_to_pdf(dir, part, line, false).await.unwrap();
+            let spot = spot.unwrap_or_else(|| panic!("{template}: no PDF spot for {part}:{line}"));
+            assert!(spot.page >= 1 && spot.height > 0.0, "{template}: {spot:?}");
+            let back = backend.synctex_to_source(dir, spot.page, spot.x + 2.0, spot.y + spot.height / 2.0, false).await;
+            let back = back.unwrap().unwrap_or_else(|| panic!("{template}: no source at {spot:?}"));
+            assert_eq!((back.part.as_str(), back.line), (part, line), "{template}: {text} at {spot:?}");
+        }
+        // The title block comes from the metadata, not from a part.
+        let title = backend.synctex_to_source(dir, 1, 300.0, 5.0, false).await.unwrap();
+        assert_eq!(title, None, "{template}");
+    }
+}
+
+/// Comments over plain words, a citation, inline math, a table cell, a figure caption and a
+/// footnote: the final PDF drops them, the review PDF (in its own build directory) highlights
+/// them with a note, and neither needs a package or font outside the cache. The report gets
+/// margins wide enough for margin notes; the others print their notes inline.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn comments_compile_in_the_final_and_the_review_pdf() {
+    let comment = |text: &str, body: &str| {
+        format!("[{text}]{{.comment author=\"Ada L.\" date=\"2026-10-28T13:00\" text=\"{body}\"}}")
+    };
+    for template in ["article", "ieee", "report"] {
+        let tmp = sample_project(template, "");
+        if template == "report" {
+            update_meta(tmp.path(), |m| (m.layout.margins.left, m.layout.margins.right) = (4.0, 4.0));
+        }
+        edit_part(tmp.path(), INTRO, |c| {
+            c.replace("[@knuth1984; @lamport1994]", &comment("[@knuth1984; @lamport1994]", "Cite \\\"both\\\"? 100% & {more}"))
+                .replace("information can be measured", &comment("information can be *measured*", "Define it"))
+                + "\nA claim.^[A footnote with a "
+                + &comment("comment", "In a note")
+                + ".]\n"
+        });
+        edit_part(tmp.path(), METHOD, |c| {
+            c.replace("$H(X) \\ge 0$", &comment("$H(X) \\ge 0$", "Prove it"))
+                .replace("A sample figure.", &comment("A sample figure.", "Better caption"))
+                .replace("| Baseline |", &format!("| {} |", comment("Baseline", "Which one?")))
+        });
+
+        let review = compiler::compile(&toolchain(), tmp.path(), CompileMode::Full, None, true).await.unwrap();
+        assert!(review.ok, "{template} review: {:#?}", errors(&review));
+        assert!(!review.used_network, "{template}: the review PDF only uses cached packages and fonts");
+        assert!(undefined(&review).is_empty(), "{template} review: {:#?}", undefined(&review));
+        let review_build = paperforge_lib::review::build_dir(&project::build_dir(tmp.path()), true);
+        assert_eq!(review.pdf_path.as_deref(), review_build.join("paper.pdf").to_str());
+        let intro = std::fs::read_to_string(review_build.join("part-sections-introduction.tex")).unwrap();
+        assert!(intro.contains("\\pfcommentbox{\\citep{knuth1984, lamport1994}}\\pfcommentnote{Ada L.}"), "{intro}");
+        let method = std::fs::read_to_string(review_build.join("part-sections-method.tex")).unwrap();
+        assert!(method.contains("\\pfcommentbox{\\(H(X) \\ge 0\\)}\\pfcommentnote{Ada L.}{Prove it}"), "{method}");
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(!outcome.used_network && outcome.converted_parts == 3, "{template}");
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        for part in ["part-sections-introduction.tex", "part-sections-method.tex"] {
+            let tex = std::fs::read_to_string(project::build_dir(tmp.path()).join(part)).unwrap();
+            assert!(!tex.contains("pfcomment") && !tex.contains("Which one"), "{template} {part}:\n{tex}");
+        }
+        assert!(!main_tex(tmp.path()).contains("pfcomment"));
+
+        let again = compiler::compile(&toolchain(), tmp.path(), CompileMode::Preview, None, true).await.unwrap();
+        assert!(again.ok && again.converted_parts == 0, "{template}: the final build left the review build alone");
+
+        let backend = Backend::new(toolchain(), None, manifest().join("resources/sample"));
+        let dir = tmp.path().to_str().unwrap();
+        let markdown = std::fs::read_to_string(tmp.path().join(METHOD)).unwrap();
+        let line = markdown.lines().position(|l| l.contains("Inline math")).unwrap() + 1;
+        let spot = backend.synctex_to_pdf(dir, METHOD, line, true).await.unwrap();
+        let spot = spot.unwrap_or_else(|| panic!("{template}: no review SyncTeX spot for {METHOD}:{line}"));
+        let back = backend.synctex_to_source(dir, spot.page, spot.x + 2.0, spot.y + spot.height / 2.0, true).await.unwrap();
+        assert_eq!(back.map(|s| (s.part, s.line)), Some((METHOD.to_string(), line)), "{template}: review SyncTeX");
+        println!("{template:<8} review tex {:>5} ms   final tex {:>5} ms", review.tex_ms, outcome.tex_ms);
+    }
+}
+
+/// Insertions and deletions over plain words, a citation, inline math, a table cell, a figure
+/// caption, a heading and a footnote, nested with comments: the review PDF colors, underlines
+/// and strikes them, the final PDF prints the accepted text, both offline.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn tracked_changes_compile_in_the_final_and_the_review_pdf() {
+    let change = |kind: &str, text: &str| format!("[{text}]{{.{kind} author=\"Ada L.\" date=\"2026-10-28T13:00\"}}");
+    let (ins, del) = (|t: &str| change("insertion", t), |t: &str| change("deletion", t));
+    for template in ["article", "ieee", "report"] {
+        let tmp = sample_project(template, "");
+        edit_part(tmp.path(), INTRO, |c| {
+            c.replace("# Introduction", &format!("# {}Introduction", ins("A short ")))
+                .replace("[@knuth1984; @lamport1994]", &del("[@knuth1984; @lamport1994]"))
+                .replace("can be measured", &format!("can be {} {}", del("measured"), ins("quantified 100% & more")))
+                + "\nA claim "
+                + &del("[that is [weak]{.comment author=\"Ada L.\" text=\"Why?\"}]")
+                + " with "
+                + &format!("[an {} note]{{.comment author=\"Ada L.\" text=\"Inside\"}}", ins("inserted"))
+                + ".^[A footnote"
+                + &del(" with a deletion")
+                + ".]\n"
+        });
+        edit_part(tmp.path(), METHOD, |c| {
+            c.replace("$H(X) \\ge 0$", &format!("{} {}", del("$H(X) \\ge 0$"), ins("$H(X) \\geq 0$")))
+                .replace("A sample figure.", &format!("A {} figure.", ins("sample")))
+                .replace("| Baseline |", &format!("| {} |", del("Baseline")))
+        });
+
+        let review = compiler::compile(&toolchain(), tmp.path(), CompileMode::Full, None, true).await.unwrap();
+        assert!(review.ok, "{template} review: {:#?}", errors(&review));
+        assert!(!review.used_network, "{template}: the review PDF only uses cached packages and fonts");
+        assert!(undefined(&review).is_empty(), "{template} review: {:#?}", undefined(&review));
+        let review_build = paperforge_lib::review::build_dir(&project::build_dir(tmp.path()), true);
+        let intro = std::fs::read_to_string(review_build.join("part-sections-introduction.tex")).unwrap();
+        assert!(intro.contains("\\pfdeletionbox{\\citep{knuth1984, lamport1994}}"), "{intro}");
+        assert!(intro.contains("\\pfdeletionhl{measured} \\pfinsertionhl{quantified} \\pfinsertionbox{100\\%}"), "{intro}");
+        let method = std::fs::read_to_string(review_build.join("part-sections-method.tex")).unwrap();
+        assert!(method.contains("\\pfdeletionbox{\\(H(X) \\ge 0\\)} \\pfinsertionbox{\\(H(X) \\geq 0\\)}"), "{method}");
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(!outcome.used_network, "{template}");
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        let intro = std::fs::read_to_string(project::build_dir(tmp.path()).join("part-sections-introduction.tex")).unwrap();
+        assert!(intro.contains("can be quantified 100\\% \\& more.") && !intro.contains("knuth1984"), "{template}:\n{intro}");
+        assert!(intro.contains("A claim with an inserted note.\\footnote{A footnote.}"), "{template}:\n{intro}");
+        let method = std::fs::read_to_string(project::build_dir(tmp.path()).join("part-sections-method.tex")).unwrap();
+        assert!(method.contains("\\(H(X) \\geq 0\\)") && !method.contains("Baseline"), "{template}:\n{method}");
+        for tex in [&intro, &method] {
+            assert!(!tex.contains("pfinsertion") && !tex.contains("pfdeletion"), "{template}:\n{tex}");
+        }
+        println!("{template:<8} review tex {:>5} ms   final tex {:>5} ms", review.tex_ms, outcome.tex_ms);
     }
 }

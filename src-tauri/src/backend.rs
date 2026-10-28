@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -9,8 +10,13 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 use tokio::task::AbortHandle;
 
+use crate::bibfetch;
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
 use crate::project::{self, PaperMeta};
+use crate::review;
+use crate::showlatex;
+use crate::synctex::{self, PdfBox, SourceSpot, SyncTex};
+use crate::zotero;
 
 pub struct Backend {
     pub toolchain: Toolchain,
@@ -23,6 +29,8 @@ pub struct Backend {
     /// One compile at a time: a new request aborts the running one.
     running: Mutex<Option<AbortHandle>>,
     build_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The last SyncTeX file read, kept until the next compile rewrites it.
+    synctex: Mutex<Option<(PathBuf, SystemTime, Arc<SyncTex>)>>,
 }
 
 #[derive(serde::Serialize)]
@@ -81,6 +89,7 @@ impl Backend {
             cache_ready: OnceCell::new(),
             running: Mutex::new(None),
             build_lock: Arc::new(tokio::sync::Mutex::new(())),
+            synctex: Mutex::new(None),
         }
     }
 
@@ -114,13 +123,14 @@ impl Backend {
         dir: String,
         mode: CompileMode,
         focus: Option<String>,
+        review: bool,
     ) -> Result<CompileOutcome, String> {
         self.ensure_cache().await?;
         let toolchain = self.toolchain.clone();
         let lock = self.build_lock.clone();
         let task = tokio::spawn(async move {
             let _guard = lock.lock().await;
-            compiler::compile(&toolchain, Path::new(&dir), mode, focus.as_deref()).await
+            compiler::compile(&toolchain, Path::new(&dir), mode, focus.as_deref(), review).await
         });
         if let Some(previous) = self.running.lock().unwrap().replace(task.abort_handle()) {
             previous.abort();
@@ -129,6 +139,54 @@ impl Backend {
             Ok(outcome) => outcome,
             Err(e) if e.is_cancelled() => Ok(CompileOutcome::cancelled()),
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The SyncTeX data of the project's last compile in `build`, `None` before the first one.
+    async fn synctex(&self, build: &Path) -> Result<Option<Arc<SyncTex>>, String> {
+        let path = build.join(synctex::SYNCTEX_FILE);
+        let Ok(modified) = tokio::fs::metadata(&path).await.and_then(|m| m.modified()) else {
+            return Ok(None);
+        };
+        if let Some((cached, at, sync)) = &*self.synctex.lock().unwrap()
+            && *cached == path
+            && *at == modified
+        {
+            return Ok(Some(sync.clone()));
+        }
+        let read = path.clone();
+        let sync = Arc::new(
+            tokio::task::spawn_blocking(move || SyncTex::read(&read)).await.map_err(|e| e.to_string())??,
+        );
+        *self.synctex.lock().unwrap() = Some((path, modified, sync.clone()));
+        Ok(Some(sync))
+    }
+
+    /// The Markdown line typeset at a spot of a PDF page (1-based, PDF points from the top left),
+    /// of the final or the review PDF.
+    pub async fn synctex_to_source(
+        &self,
+        dir: &str,
+        page: u32,
+        x: f64,
+        y: f64,
+        review: bool,
+    ) -> Result<Option<SourceSpot>, String> {
+        let dir = Path::new(dir);
+        let build = review::build_dir(&project::build_dir(dir), review);
+        match self.synctex(&build).await? {
+            Some(sync) => synctex::source_at(&sync, dir, &build, page, x, y).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Where a Markdown line (1-based) of a part was typeset in the final or the review PDF.
+    pub async fn synctex_to_pdf(&self, dir: &str, part: &str, line: usize, review: bool) -> Result<Option<PdfBox>, String> {
+        let dir = Path::new(dir);
+        let build = review::build_dir(&project::build_dir(dir), review);
+        match self.synctex(&build).await? {
+            Some(sync) => synctex::pdf_at(&sync, dir, &build, part, line).await,
+            None => Ok(None),
         }
     }
 
@@ -206,11 +264,67 @@ impl Backend {
             dir: String,
             mode: CompileMode,
             focus: Option<String>,
+            #[serde(default)]
+            review: bool,
         }
         #[derive(Deserialize)]
         struct Export {
             dir: String,
             dest: String,
+            #[serde(default)]
+            review: bool,
+        }
+        #[derive(Deserialize)]
+        struct PdfSpot {
+            dir: String,
+            page: u32,
+            x: f64,
+            y: f64,
+            #[serde(default)]
+            review: bool,
+        }
+        #[derive(Deserialize)]
+        struct PartLine {
+            dir: String,
+            part: String,
+            line: usize,
+            #[serde(default)]
+            review: bool,
+        }
+        #[derive(Deserialize)]
+        struct DictionaryAdd {
+            dir: String,
+            words: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct FigureImportBytes {
+            dir: String,
+            name: String,
+            data: String,
+        }
+        #[derive(Deserialize)]
+        struct PreambleSave {
+            dir: String,
+            content: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BibLookup {
+            query: String,
+            #[serde(default)]
+            existing_keys: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct ZoteroLink {
+            dir: String,
+            path: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct BlockLatexArgs {
+            dir: String,
+            part: String,
+            line: usize,
+            content: Option<String>,
         }
 
         match command {
@@ -261,15 +375,15 @@ impl Backend {
             }
             "read_tex" => {
                 let dir = parse::<Dir>(args)?.dir;
-                json(compiler::flatten_tex(&project::build_dir(Path::new(&dir))).await?)
+                json(compiler::flatten_tex(Path::new(&dir)).await?)
             }
             "compile" => {
                 let a: Compile = parse(args)?;
-                json(self.compile(a.dir, a.mode, a.focus).await?)
+                json(self.compile(a.dir, a.mode, a.focus, a.review).await?)
             }
             "export_pdf" => {
                 let a: Export = parse(args)?;
-                let pdf = project::build_dir(Path::new(&a.dir)).join("paper.pdf");
+                let pdf = review::build_dir(&project::build_dir(Path::new(&a.dir)), a.review).join("paper.pdf");
                 tokio::fs::copy(&pdf, &a.dest).await.map_err(|e| format!("{}: {e}", a.dest))?;
                 json(())
             }
@@ -280,13 +394,58 @@ impl Backend {
                     .map_err(|e| e.to_string())??;
                 json(())
             }
+            "synctex_to_source" => {
+                let a: PdfSpot = parse(args)?;
+                json(self.synctex_to_source(&a.dir, a.page, a.x, a.y, a.review).await?)
+            }
+            "synctex_to_pdf" => {
+                let a: PartLine = parse(args)?;
+                json(self.synctex_to_pdf(&a.dir, &a.part, a.line, a.review).await?)
+            }
+            "dictionary_read" => json(project::read_dictionary(Path::new(&parse::<Dir>(args)?.dir))?),
+            "dictionary_add" => {
+                let a: DictionaryAdd = parse(args)?;
+                json(project::add_to_dictionary(Path::new(&a.dir), &a.words)?)
+            }
+            "figure_import_bytes" => {
+                let a: FigureImportBytes = parse(args)?;
+                json(project::import_figure_bytes(Path::new(&a.dir), &a.name, &a.data)?)
+            }
+            "preamble_save" => {
+                let a: PreambleSave = parse(args)?;
+                json(project::save_preamble(Path::new(&a.dir), &a.content)?)
+            }
+            "template_eject" => {
+                let dir = parse::<Dir>(args)?.dir;
+                json(project::eject_template(Path::new(&dir), &self.toolchain.templates)?)
+            }
+            "template_restore" => json(project::restore_template(Path::new(&parse::<Dir>(args)?.dir))?),
+            "bib_lookup" => {
+                let a: BibLookup = parse(args)?;
+                json(bibfetch::lookup(&a.query, &a.existing_keys).await?)
+            }
+            "zotero_linked" => json(zotero::linked(Path::new(&parse::<Dir>(args)?.dir))?),
+            "zotero_link" => {
+                let a: ZoteroLink = parse(args)?;
+                json(zotero::link(Path::new(&a.dir), a.path.as_deref())?)
+            }
+            "zotero_read" => json(zotero::read_linked(Path::new(&parse::<Dir>(args)?.dir))?),
+            // Over HTTP there is no way to push the change event; the browser syncs by hand.
+            "zotero_watch" => {
+                parse::<Dir>(args)?;
+                json(false)
+            }
+            "block_latex" => {
+                let a: BlockLatexArgs = parse(args)?;
+                json(showlatex::block_latex(Path::new(&a.dir), &a.part, a.line, a.content).await?)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 18] = [
+pub const COMMANDS: [&str; 32] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -305,6 +464,20 @@ pub const COMMANDS: [&str; 18] = [
     "compile",
     "export_pdf",
     "export_zip",
+    "synctex_to_source",
+    "synctex_to_pdf",
+    "dictionary_read",
+    "dictionary_add",
+    "figure_import_bytes",
+    "preamble_save",
+    "template_eject",
+    "template_restore",
+    "bib_lookup",
+    "zotero_linked",
+    "zotero_link",
+    "zotero_read",
+    "zotero_watch",
+    "block_latex",
 ];
 
 #[cfg(test)]

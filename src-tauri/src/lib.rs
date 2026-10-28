@@ -1,15 +1,27 @@
 pub mod backend;
+pub mod bibfetch;
 pub mod compiler;
+pub mod layout;
+pub mod markers;
 pub mod project;
+pub mod review;
+pub mod showlatex;
+pub mod styles;
+pub mod synctex;
+pub mod zotero;
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use tauri::ipc::Response;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use backend::{Backend, EngineInfo};
+use bibfetch::Lookup;
 use compiler::{CompileMode, CompileOutcome, Toolchain};
 use project::{PaperMeta, ProjectSnapshot};
+use showlatex::BlockLatex;
+use synctex::{PdfBox, SourceSpot};
 
 fn sidecar(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
@@ -97,7 +109,7 @@ async fn read_binary(path: String) -> Result<Response, String> {
 
 #[tauri::command]
 async fn read_tex(dir: String) -> Result<String, String> {
-    compiler::flatten_tex(&project::build_dir(Path::new(&dir))).await
+    compiler::flatten_tex(Path::new(&dir)).await
 }
 
 #[tauri::command]
@@ -106,13 +118,14 @@ async fn compile(
     dir: String,
     mode: CompileMode,
     focus: Option<String>,
+    review: Option<bool>,
 ) -> Result<CompileOutcome, String> {
-    state.compile(dir, mode, focus).await
+    state.compile(dir, mode, focus, review.unwrap_or(false)).await
 }
 
 #[tauri::command]
-async fn export_pdf(dir: String, dest: String) -> Result<(), String> {
-    let pdf = project::build_dir(Path::new(&dir)).join("paper.pdf");
+async fn export_pdf(dir: String, dest: String, review: Option<bool>) -> Result<(), String> {
+    let pdf = review::build_dir(&project::build_dir(Path::new(&dir)), review.unwrap_or(false)).join("paper.pdf");
     tokio::fs::copy(&pdf, &dest).await.map(|_| ()).map_err(|e| format!("{dest}: {e}"))
 }
 
@@ -121,6 +134,101 @@ async fn export_zip(dir: String, dest: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || project::export_zip(Path::new(&dir), Path::new(&dest)))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn synctex_to_source(
+    state: State<'_, Backend>,
+    dir: String,
+    page: u32,
+    x: f64,
+    y: f64,
+    review: Option<bool>,
+) -> Result<Option<SourceSpot>, String> {
+    state.synctex_to_source(&dir, page, x, y, review.unwrap_or(false)).await
+}
+
+#[tauri::command]
+async fn synctex_to_pdf(
+    state: State<'_, Backend>,
+    dir: String,
+    part: String,
+    line: usize,
+    review: Option<bool>,
+) -> Result<Option<PdfBox>, String> {
+    state.synctex_to_pdf(&dir, &part, line, review.unwrap_or(false)).await
+}
+
+#[tauri::command]
+async fn dictionary_read(dir: String) -> Result<Vec<String>, String> {
+    project::read_dictionary(Path::new(&dir))
+}
+
+#[tauri::command]
+async fn dictionary_add(dir: String, words: Vec<String>) -> Result<Vec<String>, String> {
+    project::add_to_dictionary(Path::new(&dir), &words)
+}
+
+#[tauri::command]
+async fn figure_import_bytes(dir: String, name: String, data: String) -> Result<String, String> {
+    project::import_figure_bytes(Path::new(&dir), &name, &data)
+}
+
+#[tauri::command]
+async fn preamble_save(dir: String, content: String) -> Result<(), String> {
+    project::save_preamble(Path::new(&dir), &content)
+}
+
+#[tauri::command]
+async fn template_eject(state: State<'_, Backend>, dir: String) -> Result<ProjectSnapshot, String> {
+    project::eject_template(Path::new(&dir), &state.toolchain.templates)
+}
+
+#[tauri::command]
+async fn template_restore(dir: String) -> Result<ProjectSnapshot, String> {
+    project::restore_template(Path::new(&dir))
+}
+
+#[tauri::command]
+async fn bib_lookup(query: String, existing_keys: Vec<String>) -> Result<Lookup, String> {
+    bibfetch::lookup(&query, &existing_keys).await
+}
+
+#[tauri::command]
+async fn zotero_linked(dir: String) -> Result<Option<String>, String> {
+    zotero::linked(Path::new(&dir))
+}
+
+#[tauri::command]
+async fn zotero_link(dir: String, path: Option<String>) -> Result<Option<String>, String> {
+    zotero::link(Path::new(&dir), path.as_deref())
+}
+
+#[tauri::command]
+async fn zotero_read(dir: String) -> Result<Option<String>, String> {
+    zotero::read_linked(Path::new(&dir))
+}
+
+/// The watcher of the open project's linked bibliography; replaced when another project opens.
+#[derive(Default)]
+struct ZoteroWatch(Mutex<Option<notify::RecommendedWatcher>>);
+
+/// Watches the project's linked bibliography; false when it has none.
+#[tauri::command]
+async fn zotero_watch(app: AppHandle, watch: State<'_, ZoteroWatch>, dir: String) -> Result<bool, String> {
+    let mut current = watch.0.lock().unwrap();
+    *current = None;
+    let Some(bib) = zotero::linked(Path::new(&dir))? else { return Ok(false) };
+    let watcher = zotero::watch(Path::new(&bib), move || {
+        let _ = app.emit(zotero::CHANGED_EVENT, &dir);
+    })?;
+    *current = Some(watcher);
+    Ok(true)
+}
+
+#[tauri::command]
+async fn block_latex(dir: String, part: String, line: usize, content: Option<String>) -> Result<Option<BlockLatex>, String> {
+    showlatex::block_latex(Path::new(&dir), &part, line, content).await
 }
 
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
@@ -145,6 +253,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(build_backend(app.handle())?);
+            app.manage(ZoteroWatch::default());
             // Seed the TeX cache while the user is still picking a project.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -171,6 +280,20 @@ pub fn run() {
             compile,
             export_pdf,
             export_zip,
+            synctex_to_source,
+            synctex_to_pdf,
+            dictionary_read,
+            dictionary_add,
+            figure_import_bytes,
+            preamble_save,
+            template_eject,
+            template_restore,
+            bib_lookup,
+            zotero_linked,
+            zotero_link,
+            zotero_read,
+            zotero_watch,
+            block_latex,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -142,7 +142,7 @@ Grid widget that serializes to an aligned pipe table with caption and label. `pa
 ### 10. Equations
 
 `mathlive` 0.111.1 (MIT) in a popover on `$…$` / `$$…$$`. Write back only if the user edits,
-because MathLive normalizes the LaTeX **[S]**. Preamble macros are unknown to MathLive and KaTeX.
+because MathLive normalizes the LaTeX **[V]**. Preamble macros are unknown to MathLive and KaTeX.
 
 ### 11. Page setup
 
@@ -178,7 +178,7 @@ changes is L/high risk; ship "compare with version X" (from the git plan) first.
 ### 16. Smaller items
 
 Grammar: `harper.js` 3.0.0 (Apache-2.0, WASM; the CSP already allows `wasm-unsafe-eval`), mostly
-English **[S]**. Footnote button: `formatting.footnote` exists but is missing from
+English **[V]**. Footnote button: `formatting.footnote` exists but is missing from
 `Toolbar.tsx GROUPS`. Word goals on top of the `StatusBar.tsx` counter. Outline folding:
 `foldGutter` is not enabled in `base()`.
 

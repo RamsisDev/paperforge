@@ -1,17 +1,21 @@
 import { create } from "zustand";
-import type { Diagnostic, PaperMeta, Part, TocEntry } from "@/lib/api";
+import { escapeRegExp, type FindOptions } from "@/editor/findAcrossParts";
+import type { Diagnostic, LabelRef, PaperMeta, Part, TocEntry } from "@/lib/api";
 
 export const BIB_FILE = "refs.bib";
 export const TEX_FILE = "paper.tex";
+export const PREAMBLE_FILE = "preamble.tex";
 
-/** A Markdown part path, `BIB_FILE` or `TEX_FILE`. */
+/** A Markdown part path, `BIB_FILE`, `TEX_FILE` or `PREAMBLE_FILE`. */
 export type EditorFile = string;
-export type SidebarTab = "paper" | "structure" | "refs" | "figures";
+export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find" | "comments";
 export type Theme = "light" | "dark";
+/** "writing" renders the Markdown in place; "source" shows it as typed. */
+export type EditorMode = "writing" | "source";
 export type GalleryMode = "create" | "change";
 
 export function isPartFile(file: EditorFile): boolean {
-  return file !== BIB_FILE && file !== TEX_FILE;
+  return file !== BIB_FILE && file !== TEX_FILE && file !== PREAMBLE_FILE;
 }
 
 export interface CompileStatus {
@@ -26,7 +30,15 @@ export interface Jump {
   file: EditorFile;
   /** 0-based line. */
   line: number;
+  /** Text to select instead of placing the cursor at the line start. */
+  select?: { from: number; to: number };
   nonce: number;
+}
+
+export interface FindState extends FindOptions {
+  replace: string;
+  /** Bumped to focus the query field. */
+  focus: number;
 }
 
 interface State {
@@ -35,6 +47,8 @@ interface State {
   parts: Part[];
   bib: string;
   tex: string;
+  /** `preamble.tex`, null while the project has none. */
+  preamble: string | null;
   figures: string[];
 
   activeFile: EditorFile;
@@ -44,9 +58,12 @@ interface State {
   diagnostics: Diagnostic[];
   /** Contents, figures and tables of the last successful compile, as LaTeX numbered them. */
   toc: TocEntry[];
+  /** Label → printed number and page, from the last successful compile. */
+  labels: Record<string, LabelRef>;
   pdf: { data: Uint8Array; version: number } | null;
 
   theme: Theme;
+  editorMode: EditorMode;
   sidebarTab: SidebarTab;
   sidebarOpen: boolean;
   problemsOpen: boolean;
@@ -61,10 +78,19 @@ interface State {
   previewReveal: { text: string; nonce: number } | null;
   pageReveal: { page: number; nonce: number } | null;
   contentsReveal: number;
+  find: FindState;
+  /** The name new comments are signed with; "" until the user gives one. */
+  commentAuthor: string;
+  /** Compiles produce the review PDF (comments rendered) instead of the final one. */
+  reviewMode: boolean;
+  /** Edits in Markdown parts are recorded as insertions and deletions; remembered per project. */
+  trackChanges: boolean;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
   (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
+const storedEditorMode: EditorMode = localStorage.getItem("paperforge.editorMode") === "writing" ? "writing" : "source";
 
 export const initialProjectState = {
   dir: null,
@@ -72,6 +98,7 @@ export const initialProjectState = {
   parts: [] as Part[],
   bib: "",
   tex: "",
+  preamble: null,
   figures: [],
   activeFile: "" as EditorFile,
   saveState: "saved" as const,
@@ -79,16 +106,20 @@ export const initialProjectState = {
   compile: { state: "idle", ms: null, usedNetwork: false, passes: 0 } as CompileStatus,
   diagnostics: [],
   toc: [],
+  labels: {} as Record<string, LabelRef>,
   pdf: null,
   addingPart: null,
   jump: null,
   previewReveal: null,
   pageReveal: null,
+  reviewMode: false,
+  trackChanges: false,
 };
 
 export const useStore = create<State>(() => ({
   ...initialProjectState,
   theme: storedTheme,
+  editorMode: storedEditorMode,
   sidebarTab: "paper",
   sidebarOpen: true,
   problemsOpen: false,
@@ -96,6 +127,8 @@ export const useStore = create<State>(() => ({
   previewFocus: localStorage.getItem("paperforge.previewFocus") === "1",
   gallery: null,
   contentsReveal: 0,
+  find: { query: "", replace: "", regex: false, matchCase: false, wholeWord: false, skipMarkup: false, focus: 0 },
+  commentAuthor: localStorage.getItem("paperforge.commentAuthor") ?? "",
 }));
 
 export const store = {
@@ -103,10 +136,41 @@ export const store = {
   set: useStore.setState,
 };
 
+/** What the last successful compile printed for `label` (e.g. "fig:x"); undefined before it. */
+export function labelRef(label: string): LabelRef | undefined {
+  return store.get().labels[label];
+}
+
+export function useLabelRef(label: string): LabelRef | undefined {
+  return useStore((s) => s.labels[label]);
+}
+
 let nonce = 0;
 
 export function jumpTo(file: EditorFile, line: number) {
   store.set({ activeFile: file, jump: { file, line, nonce: ++nonce } });
+}
+
+/** Opens `file` with `from`..`to` selected; `line` is the 0-based line of `from`. */
+export function selectInFile(file: EditorFile, line: number, from: number, to: number) {
+  store.set({ activeFile: file, jump: { file, line, select: { from, to }, nonce: ++nonce } });
+}
+
+/** Opens the Find tab, searching for `query` when given. */
+export function openFind(query?: string) {
+  store.set((s) => ({
+    sidebarOpen: true,
+    sidebarTab: "find",
+    find: {
+      ...s.find,
+      query: query === undefined ? s.find.query : s.find.regex ? escapeRegExp(query) : query,
+      focus: s.find.focus + 1,
+    },
+  }));
+}
+
+export function updateFind(patch: Partial<Omit<FindState, "focus">>) {
+  store.set((s) => ({ find: { ...s.find, ...patch } }));
 }
 
 export function openFile(file: EditorFile) {
@@ -139,4 +203,27 @@ export function askNewPart(index: number) {
 export function setTheme(theme: Theme) {
   localStorage.setItem("paperforge.theme", theme);
   store.set({ theme });
+}
+
+export function setEditorMode(editorMode: EditorMode) {
+  localStorage.setItem("paperforge.editorMode", editorMode);
+  store.set({ editorMode });
+}
+
+export function setCommentAuthor(name: string) {
+  const commentAuthor = name.trim();
+  localStorage.setItem("paperforge.commentAuthor", commentAuthor);
+  store.set({ commentAuthor });
+}
+
+const trackChangesKey = (dir: string) => `paperforge.trackChanges:${dir}`;
+
+export function storedTrackChanges(dir: string): boolean {
+  return localStorage.getItem(trackChangesKey(dir)) === "1";
+}
+
+export function setTrackChanges(trackChanges: boolean) {
+  const { dir } = store.get();
+  if (dir) localStorage.setItem(trackChangesKey(dir), trackChanges ? "1" : "0");
+  store.set({ trackChanges });
 }

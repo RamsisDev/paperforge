@@ -1,8 +1,12 @@
-\documentclass[12pt,a4paper,oneside]{report}
+$-- classoption: 12pt, a4paper, oneside
+\documentclass[$for(classoption)$$classoption$$sep$,$endfor$]{report}
 \usepackage{fontspec}
 \usepackage{amssymb}
 $common()$
-\usepackage[margin=2.5cm]{geometry}
+\usepackage[$geometry$]{geometry}
+$if(page-setup)$
+$page-setup$
+$endif$
 \usepackage[numbers,sort&compress]{natbib}
 \usepackage[hidelinks]{hyperref}
 \let\pfbibsection\bibsection

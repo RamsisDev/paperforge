@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Part, TocEntry } from "./api";
-import { parseBib, shortAuthors } from "./bib";
+import { appendToBib, entryRanges, mergeBib, parseBib, shortAuthors } from "./bib";
 import { locate } from "./diagnostics";
 import { effectiveHeadings, headings, labels, levelInChapter, wordCount } from "./outline";
 import {
@@ -51,6 +51,81 @@ describe("parseBib", () => {
     expect(shortAuthors("Donald E. Knuth")).toBe("Knuth");
     expect(shortAuthors("Knuth, Donald and Lamport, Leslie")).toBe("Knuth & Lamport");
     expect(shortAuthors("A One and B Two and C Three")).toBe("One et al.");
+  });
+});
+
+describe("appendToBib", () => {
+  const entry = "@misc{new,\n  title = {New}\n}\n";
+
+  it("keeps the existing bytes and separates with a blank line", () => {
+    for (const [bib, sep] of [
+      ["@misc{a}", "\n\n"],
+      ["@misc{a}\n", "\n"],
+      ["@misc{a}\n\n", ""],
+      ["% only  a comment \r\n", "\n"],
+    ]) {
+      const next = appendToBib(bib, entry);
+      expect(next.bib).toBe(bib + sep + entry);
+      expect(next.bib.split("\n")[next.line]).toBe("@misc{new,");
+    }
+  });
+
+  it("starts an empty or blank file with the entry", () => {
+    expect(appendToBib("", entry)).toEqual({ bib: entry, line: 0 });
+    expect(appendToBib("  \n", entry).bib).toBe(`  \n${entry}`);
+    expect(appendToBib("  \n", entry).line).toBe(1);
+  });
+});
+
+describe("mergeBib", () => {
+  const bib = `% my notes
+@article{knuth1984,
+  title = {The {\\TeX}book},
+  year  = 1984
+}
+
+@misc(paren, title = {P (with parens)})
+@string{x = "X"}
+@book{lamport1994, title = {LaTeX}}
+`;
+
+  it("finds entries with braces and parentheses, skipping @string", () => {
+    const ranges = entryRanges(bib);
+    expect(ranges.map((r) => r.key)).toEqual(["knuth1984", "paren", "lamport1994"]);
+    expect(bib.slice(ranges[0].from, ranges[0].to)).toBe("@article{knuth1984,\n  title = {The {\\TeX}book},\n  year  = 1984\n}");
+    expect(bib.slice(ranges[1].from, ranges[1].to)).toBe("@misc(paren, title = {P (with parens)})");
+    expect(entryRanges("@misc{open, title = {never closed\n\n")[0]).toMatchObject({ from: 0, to: 33 });
+  });
+
+  it("appends new keys and replaces changed entries in place", () => {
+    const incoming = `@book{lamport1994,
+  title = {LaTeX: A Document Preparation System}
+}
+@article{knuth1984, title = {The {\\TeX}book}, year = 1986}
+@misc{shannon1948, title = {A Mathematical Theory}}
+@misc{shannon1948, title = {duplicate}}
+`;
+    const merged = mergeBib(bib, incoming);
+    expect(merged.added).toEqual(["shannon1948"]);
+    expect(merged.updated).toEqual(["lamport1994", "knuth1984"]);
+    expect(merged.bib).toBe(
+      `% my notes
+@article{knuth1984, title = {The {\\TeX}book}, year = 1986}
+
+@misc(paren, title = {P (with parens)})
+@string{x = "X"}
+@book{lamport1994,
+  title = {LaTeX: A Document Preparation System}
+}
+
+@misc{shannon1948, title = {A Mathematical Theory}}
+`,
+    );
+  });
+
+  it("leaves the file untouched when nothing changed", () => {
+    const same = "@book{lamport1994,   title = {LaTeX}}\n@misc(paren,\n  title = {P (with parens)})";
+    expect(mergeBib(bib, same)).toEqual({ bib, added: [], updated: [] });
   });
 });
 
@@ -258,6 +333,14 @@ describe("locate", () => {
     expect(bib).toMatchObject({ file: "refs.bib", line: 6 });
     expect(tex).toMatchObject({ file: "paper.tex", line: 11 });
     expect(none).toMatchObject({ file: null, line: null });
+  });
+
+  it("prefers the Markdown line the block markers resolved, unless the part got shorter", () => {
+    const d = { ...base, message: "Overfull \\hbox", source: "Inline math works as usual", part: "sections/method.md" };
+    const [marked, stale, unresolved] = locate([{ ...d, partLine: 7 }, { ...d, partLine: 99 }, { ...d, partLine: null }], PARTS);
+    expect(marked).toMatchObject({ file: "sections/method.md", line: 6 });
+    expect(stale).toMatchObject({ file: "sections/method.md", line: 2 });
+    expect(unresolved).toMatchObject({ file: "sections/method.md", line: 2 });
   });
 
   it("searches every part when the diagnostic has no part", () => {

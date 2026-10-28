@@ -7,6 +7,11 @@ export interface TemplateInfo {
   defaultBibStyle: string;
   /** Drives the gallery thumbnail. */
   layout: { columns: 1 | 2; chapters: boolean; margins: "normal" | "wide" };
+  /**
+   * Paper and font size from the template's `$-- classoption:` line, and whether its class prints
+   * two-sided. Absent for journal templates, whose page is set by the journal.
+   */
+  page?: { paper: string; fontSize: string; twoside: boolean };
 }
 
 export const TEMPLATES: TemplateInfo[] = [
@@ -16,6 +21,7 @@ export const TEMPLATES: TemplateInfo[] = [
     description: "Generic one-column article (A4, 11pt)",
     defaultBibStyle: "plainnat",
     layout: { columns: 1, chapters: false, margins: "normal" },
+    page: { paper: "a4paper", fontSize: "11pt", twoside: false },
   },
   {
     id: "ieee",
@@ -51,6 +57,7 @@ export const TEMPLATES: TemplateInfo[] = [
     description: "Chapters, one column, A4 12pt",
     defaultBibStyle: "plainnat",
     layout: { columns: 1, chapters: true, margins: "normal" },
+    page: { paper: "a4paper", fontSize: "12pt", twoside: false },
   },
   {
     id: "book",
@@ -58,6 +65,7 @@ export const TEMPLATES: TemplateInfo[] = [
     description: "Book class with chapters and two-sided pages",
     defaultBibStyle: "plainnat",
     layout: { columns: 1, chapters: true, margins: "wide" },
+    page: { paper: "a4paper", fontSize: "11pt", twoside: true },
   },
 ];
 

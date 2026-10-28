@@ -10,7 +10,18 @@
 import { setWindowTitle } from "@/lib/platform";
 import { api, baseName, type CompileMode, type PaperMeta, type Part, type ProjectSnapshot } from "@/lib/api";
 import { usesChapters } from "@/lib/templates";
-import { BIB_FILE, TEX_FILE, initialProjectState, isPartFile, store, useStore, type EditorFile } from "@/store";
+import {
+  BIB_FILE,
+  PREAMBLE_FILE,
+  TEX_FILE,
+  initialProjectState,
+  isPartFile,
+  openFile,
+  store,
+  storedTrackChanges,
+  useStore,
+  type EditorFile,
+} from "@/store";
 import { rememberProject } from "@/lib/recent";
 
 const SAVE_DELAY_MS = 300;
@@ -20,7 +31,8 @@ const MAX_RERUNS = 3;
 
 /** Parts edited since their last save; their current text is read from the store when written. */
 const pendingParts = new Set<string>();
-const pendingFields = new Set<"meta" | "bib">();
+const pendingFields = new Set<"meta" | "bib" | "preamble">();
+const PREAMBLE_STARTER = "% Added at the end of the LaTeX preamble: \\usepackage, \\newcommand, ...\n";
 /** Text of each part as the backend last stored it. */
 let lastSaved = new Map<string, string>();
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -50,8 +62,10 @@ export function loadProject(snapshot: ProjectSnapshot) {
     meta: snapshot.meta,
     parts: snapshot.parts,
     bib: snapshot.bib,
+    preamble: snapshot.preamble ?? null,
     figures: snapshot.figures,
     activeFile: snapshot.parts[0]?.file ?? BIB_FILE,
+    trackChanges: storedTrackChanges(snapshot.dir),
   });
   rememberProject(snapshot.dir, snapshot.meta.title);
   setWindowTitle(`${snapshot.meta.title || baseName(snapshot.dir)} — PaperForge`);
@@ -72,7 +86,7 @@ function queueSave() {
 }
 
 async function writePending() {
-  const { dir, parts, meta, bib } = store.get();
+  const { dir, parts, meta, bib, preamble } = store.get();
   const files = [...pendingParts];
   const fields = [...pendingFields];
   pendingParts.clear();
@@ -92,13 +106,22 @@ async function writePending() {
       errors.push(String(e));
     }
   });
-  if (fields.length) {
+  if (fields.includes("meta") || fields.includes("bib")) {
     const update: { meta?: PaperMeta; bib?: string } = {};
     if (fields.includes("meta") && meta) update.meta = meta;
     if (fields.includes("bib")) update.bib = bib;
     writes.push(
       api.save(dir, update).catch((e) => {
-        fields.forEach((f) => pendingFields.add(f));
+        if (update.meta) pendingFields.add("meta");
+        if (update.bib !== undefined) pendingFields.add("bib");
+        errors.push(String(e));
+      }),
+    );
+  }
+  if (fields.includes("preamble") && preamble !== null) {
+    writes.push(
+      api.savePreamble(dir, preamble).catch((e) => {
+        pendingFields.add("preamble");
         errors.push(String(e));
       }),
     );
@@ -126,6 +149,18 @@ export function setBib(bib: string) {
   store.set({ bib });
   pendingFields.add("bib");
   queueSave();
+}
+
+export function setPreamble(preamble: string) {
+  store.set({ preamble });
+  pendingFields.add("preamble");
+  queueSave();
+}
+
+/** Opens preamble.tex in the editor, creating it first when the project has none. */
+export function openPreamble() {
+  if (store.get().preamble === null) setPreamble(PREAMBLE_STARTER);
+  openFile(PREAMBLE_FILE);
 }
 
 export function updateMeta(patch: Partial<PaperMeta>) {
@@ -162,10 +197,12 @@ function applySnapshot(snapshot: ProjectSnapshot, preferredFile?: EditorFile) {
 
   const keep = (file: EditorFile | undefined) => file !== undefined && (!isPartFile(file) || files.has(file));
   const activeFile = keep(preferredFile) ? preferredFile! : keep(s.activeFile) ? s.activeFile : (parts[0]?.file ?? BIB_FILE);
+  const { parts: partFiles, templateFile } = snapshot.meta;
   store.set({
-    meta: pendingFields.has("meta") && s.meta ? { ...s.meta, parts: snapshot.meta.parts } : snapshot.meta,
+    meta: pendingFields.has("meta") && s.meta ? { ...s.meta, parts: partFiles, templateFile } : snapshot.meta,
     parts,
     bib: pendingFields.has("bib") ? s.bib : snapshot.bib,
+    preamble: pendingFields.has("preamble") ? s.preamble : (snapshot.preamble ?? null),
     figures: snapshot.figures,
     activeFile,
     addingPart: null,
@@ -231,6 +268,14 @@ export function mergeWithNext(file: string) {
   );
 }
 
+export function ejectTemplate() {
+  return restructure((dir) => api.ejectTemplate(dir));
+}
+
+export function restoreTemplate() {
+  return restructure((dir) => api.restoreTemplate(dir));
+}
+
 // Compiling ----------------------------------------------------------------------------------
 
 /** The part a preview compiles alone, when "current chapter only" applies. */
@@ -255,25 +300,34 @@ useStore.subscribe((s, prev) => {
 
 export function scheduleCompile(mode: CompileMode, delay: number) {
   clearTimeout(compileTimer);
-  compileTimer = setTimeout(() => void runCompile(mode, 0, compileFocus(mode)), delay);
+  compileTimer = setTimeout(() => void runCompile(mode, 0, compileFocus(mode), store.get().reviewMode), delay);
 }
 
-/** Saves pending edits and runs a full compile; resolves with whether a fresh PDF exists. */
-export async function compileNow(mode: CompileMode = "full"): Promise<boolean> {
+/**
+ * Saves pending edits and runs a full compile; resolves with whether a fresh PDF exists. `review`
+ * defaults to the preview's mode; a compile in the other mode leaves the preview's PDF alone.
+ */
+export async function compileNow(mode: CompileMode = "full", review = store.get().reviewMode): Promise<boolean> {
   clearTimeout(compileTimer);
   await flushSaves();
-  return runCompile(mode, 0, compileFocus(mode));
+  return runCompile(mode, 0, compileFocus(mode), review);
 }
 
-async function runCompile(mode: CompileMode, rerun: number, focus: string | null): Promise<boolean> {
+/** Shows the review PDF (comments rendered) in the preview, or the final one again. */
+export function setReviewMode(reviewMode: boolean) {
+  store.set({ reviewMode });
+  scheduleCompile("preview", 0);
+}
+
+async function runCompile(mode: CompileMode, rerun: number, focus: string | null, review: boolean): Promise<boolean> {
   const dir = store.get().dir;
   if (!dir) return false;
   const seq = ++compileSeq;
   store.set((s) => ({ compile: { ...s.compile, state: "running" } }));
   try {
-    const out = await api.compile(dir, mode, focus);
+    const out = await api.compile(dir, mode, focus, review);
     if (seq !== compileSeq || out.cancelled) return false;
-    if (out.ok && out.pdfPath) {
+    if (out.ok && out.pdfPath && review === store.get().reviewMode) {
       const bytes = new Uint8Array(await api.readBinary(out.pdfPath));
       if (seq !== compileSeq) return false;
       store.set((s) => ({ pdf: { data: bytes, version: (s.pdf?.version ?? 0) + 1 } }));
@@ -281,6 +335,7 @@ async function runCompile(mode: CompileMode, rerun: number, focus: string | null
     store.set((s) => ({
       diagnostics: out.diagnostics,
       toc: out.ok ? (out.toc ?? []) : s.toc,
+      labels: out.ok ? (out.labels ?? {}) : s.labels,
       compile: {
         state: out.ok ? "ok" : "error",
         ms: out.pandocMs + out.texMs,
@@ -290,7 +345,7 @@ async function runCompile(mode: CompileMode, rerun: number, focus: string | null
     }));
     if (store.get().activeFile === TEX_FILE) void refreshTex();
     if (out.ok && out.needsRerun && rerun + 1 < MAX_RERUNS) {
-      return runCompile("preview", rerun + 1, focus);
+      return runCompile("preview", rerun + 1, focus, review);
     }
     return out.ok;
   } catch (e) {
