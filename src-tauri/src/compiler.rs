@@ -18,6 +18,7 @@ use tokio::task::JoinSet;
 
 use crate::markers::{self, BlockMap, Marked};
 use crate::project::{self, BIB_FILE, BUILD_DIR, PREAMBLE_FILE, PaperMeta};
+use crate::styles;
 
 /// The default relay redirects to a mirror that is unreachable; this host serves the same bundle.
 pub const BUNDLE_URL: &str = "https://data1.fullyjustified.net/tlextras-2022.0r0.tar";
@@ -40,7 +41,7 @@ const FRAGMENT_EXTENSIONS: [&str; 6] = ["tex", "aux", "bbl", "blg", "hash", "pan
 const FRAGMENT_INTERMEDIATES: [&str; 3] = ["aux", "bbl", "blg"];
 /// Part of every conversion cache key: bump it when the Pandoc command lines or the Markdown
 /// fed to them (block markers) change.
-const PANDOC_ARGS_VERSION: &str = "3";
+const PANDOC_ARGS_VERSION: &str = "4";
 
 const PANDOC_TIMEOUT: Duration = Duration::from_secs(30);
 const TEX_OFFLINE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -286,7 +287,15 @@ pub fn pandoc_metadata(meta: &PaperMeta, has_bib: bool) -> Value {
     if meta.toc {
         doc["toc-depth"] = json!(latex_toc_depth(meta));
     }
+    add_style_metadata(&mut doc, meta);
     doc
+}
+
+/// Lets the filter map styled divs and spans in the title and abstract too.
+fn add_style_metadata(doc: &mut Value, meta: &PaperMeta) {
+    if !meta.styles.is_empty() {
+        doc[styles::METADATA_KEY] = json!(styles::metadata(&meta.styles));
+    }
 }
 
 /// `tocDepth` counts heading levels from `#`, which is a chapter (LaTeX level 0) in chapter
@@ -365,13 +374,15 @@ fn class_options(template: &str, chosen: &[String]) -> Result<Vec<String>, Strin
     Ok(options)
 }
 
-/// `--variable` values of the main document, which Pandoc inserts verbatim: the class options
-/// and the project's `preamble.tex` (at the end of the preamble, via `$header-includes$`).
+/// `--variable` values of the main document, which Pandoc inserts verbatim: the class options,
+/// then the style definitions and the project's `preamble.tex` (at the end of the preamble, via
+/// `$header-includes$`), so the preamble can use or redefine the styles.
 fn template_variables(template: &str, meta: &PaperMeta, preamble: &str) -> Result<Vec<(&'static str, String)>, String> {
     let mut variables: Vec<(&'static str, String)> =
         class_options(template, &meta.class_options)?.into_iter().map(|o| ("classoption", o)).collect();
-    if !preamble.trim().is_empty() {
-        variables.push(("header-includes", preamble.trim_end().to_string()));
+    let header = styles::definitions(&meta.styles) + preamble;
+    if !header.trim().is_empty() {
+        variables.push(("header-includes", header.trim_end().to_string()));
     }
     Ok(variables)
 }
@@ -548,6 +559,7 @@ async fn convert_parts(
     build: &Path,
     fragments: &[Fragment],
     options: FragmentOptions,
+    style_classes: &str,
     pandoc_id: &str,
 ) -> Result<Conversion, String> {
     let filter = tokio::fs::read(tc.templates.join("paper.lua")).await.map_err(|e| e.to_string())?;
@@ -567,11 +579,11 @@ async fn convert_parts(
                 continue;
             }
         };
-        let key = cache_key(&[pandoc_id.as_bytes(), &filter, &flags, &content]);
+        let key = cache_key(&[pandoc_id.as_bytes(), &filter, &flags, style_classes.as_bytes(), &content]);
         let marked = markers::mark_blocks(&String::from_utf8_lossy(&content));
         let input = marked.text.clone().into_bytes();
         marks[i] = Some(marked);
-        let cmd = pandoc_fragment(tc, dir, fragment, options);
+        let cmd = pandoc_fragment(tc, dir, fragment, options, style_classes);
         let (build, stem, limit) = (build.to_path_buf(), fragment.name.clone(), limit.clone());
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.expect("the semaphore is never closed");
@@ -594,8 +606,15 @@ async fn convert_parts(
     Ok(conversion)
 }
 
-/// Reads the part, with its block markers, from stdin.
-fn pandoc_fragment(tc: &Toolchain, dir: &Path, fragment: &Fragment, options: FragmentOptions) -> Command {
+/// Reads the part, with its block markers, from stdin. `style_classes` lists the styled classes
+/// as [`styles::metadata`] does.
+fn pandoc_fragment(
+    tc: &Toolchain,
+    dir: &Path,
+    fragment: &Fragment,
+    options: FragmentOptions,
+    style_classes: &str,
+) -> Command {
     let mut cmd = Command::new(&tc.pandoc);
     cmd.current_dir(dir)
         .args(["--from", "markdown", "--to", "latex", "--natbib"])
@@ -612,6 +631,9 @@ fn pandoc_fragment(tc: &Toolchain, dir: &Path, fragment: &Fragment, options: Fra
     }
     if options.numeric_only {
         cmd.arg("--metadata=numeric-only-citations:true");
+    }
+    if !style_classes.is_empty() {
+        cmd.arg(format!("--metadata={}:{style_classes}", styles::METADATA_KEY));
     }
     cmd.arg(format!(
         "--output={}",
@@ -683,6 +705,7 @@ pub async fn compile(
     if meta.parts.is_empty() {
         return Err("The document has no parts".into());
     }
+    styles::validate(&meta.styles)?;
     let build = project::build_dir(dir);
     tokio::fs::create_dir_all(&build).await.map_err(|e| e.to_string())?;
     // A class's .aux commands are not defined in another class, and an ejected copy may load
@@ -701,13 +724,14 @@ pub async fn compile(
     let mut outcome = CompileOutcome::default();
     let started = Instant::now();
     let options = FragmentOptions { chapters, numeric_only: numeric_only_citations(&meta) };
+    let style_classes = styles::metadata(&meta.styles);
     let includeonly = focus
         .filter(|_| chapters && mode == CompileMode::Preview)
         .and_then(|focus| fragments.iter().find(|f| f.part == focus))
         .map(|f| f.name.as_str());
     // The main document only names the fragments, so it converts alongside them.
     let (parts, main) = tokio::join!(
-        convert_parts(tc, dir, &build, &fragments, options, &pandoc_id),
+        convert_parts(tc, dir, &build, &fragments, options, &style_classes, &pandoc_id),
         convert_main(tc, dir, &build, &meta, &fragments, includeonly, &pandoc_id),
     );
     let (parts, main) = (parts?, main?);
@@ -1581,7 +1605,7 @@ mod tests {
         let frags = fragments(&["a.md".into(), "b.md".into()]);
         let convert = |options| {
             let (tc, frags, build) = (&tc, &frags, &build);
-            async move { convert_parts(tc, dir, build, frags, options, "test").await.unwrap() }
+            async move { convert_parts(tc, dir, build, frags, options, "", "test").await.unwrap() }
         };
         let sections = FragmentOptions { chapters: false, numeric_only: false };
 
@@ -1618,7 +1642,7 @@ mod tests {
             let (tc, frags, build) = (&tc, &frags, &build);
             async move {
                 let options = FragmentOptions { chapters, numeric_only: false };
-                let conversion = convert_parts(tc, dir, build, frags, options, "test").await.unwrap();
+                let conversion = convert_parts(tc, dir, build, frags, options, "", "test").await.unwrap();
                 assert!(conversion.ok, "{:?}", conversion.diagnostics);
                 std::fs::read_to_string(build.join("part-a.tex")).unwrap()
             }
@@ -1652,7 +1676,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.md"), "# A\n").unwrap();
         let frags = fragments(&["a.md".into(), "missing.md".into()]);
         let options = FragmentOptions { chapters: false, numeric_only: false };
-        let result = convert_parts(&tc, tmp.path(), &build, &frags, options, "test").await.unwrap();
+        let result = convert_parts(&tc, tmp.path(), &build, &frags, options, "", "test").await.unwrap();
         assert!(!result.ok);
         let error = result.diagnostics.iter().find(|d| d.severity == Severity::Error).unwrap();
         assert_eq!(error.part.as_deref(), Some("missing.md"));
@@ -1772,14 +1796,131 @@ on two lines.
 "##;
 
     async fn fragment_tex(markdown: &str, options: FragmentOptions) -> String {
-        let tc = dev_toolchain();
+        fragment_tex_with(&dev_toolchain(), markdown, options, "").await
+    }
+
+    async fn fragment_tex_with(tc: &Toolchain, markdown: &str, options: FragmentOptions, style_classes: &str) -> String {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project::build_dir(tmp.path())).unwrap();
         let fragment = Fragment { part: "a.md".into(), name: "part-a".into() };
-        let cmd = pandoc_fragment(&tc, tmp.path(), &fragment, options);
+        let cmd = pandoc_fragment(tc, tmp.path(), &fragment, options, style_classes);
         let out = run(cmd, PANDOC_TIMEOUT, Some(markdown.as_bytes().to_vec())).await.unwrap();
         assert!(out.success, "{}", out.text);
         std::fs::read_to_string(project::build_dir(tmp.path()).join("part-a.tex")).unwrap()
+    }
+
+    const STYLED: &str = "::: {.note}\nA **noted** paragraph.\n\nAnd a second.\n:::\n\n\
+        Some [key words]{.key-word2}, [caps]{.smallcaps}, [mark]{.mark} and [plain]{.other}.\n";
+
+    #[tokio::test]
+    async fn styled_divs_and_spans_become_environments_and_commands() {
+        let options = FragmentOptions { chapters: false, numeric_only: false };
+        let tc = dev_toolchain();
+        let tex = fragment_tex_with(&tc, STYLED, options, "div:note span:key-word2 span:smallcaps").await;
+        assert!(
+            tex.starts_with("\\begin{pf-note}\n\nA \\textbf{noted} paragraph.\n\nAnd a second.\n\n\\end{pf-note}"),
+            "{tex}"
+        );
+        assert!(tex.contains("\\pfstylekeyZwordC{key words}, \\pfstylesmallcaps{caps}, \\hl{mark} and {plain}."), "{tex}");
+
+        let plain = fragment_tex_with(&tc, STYLED, options, "").await;
+        assert!(plain.starts_with("A \\textbf{noted}") && plain.contains("\\textsc{caps}"), "{plain}");
+    }
+
+    /// The filter as it was before styles: no Div, Span, SmallCaps or Underline handlers.
+    fn toolchain_without_style_handlers(templates: &Path) -> Toolchain {
+        let tc = dev_toolchain();
+        let filter = std::fs::read_to_string(tc.templates.join("paper.lua")).unwrap();
+        let handlers = ", Div = Div, Span = Span,\n    SmallCaps = styled_element(\"smallcaps\"), Underline = styled_element(\"underline\") }";
+        assert!(filter.contains(handlers));
+        std::fs::write(templates.join("paper.lua"), filter.replace(handlers, " }")).unwrap();
+        Toolchain { templates: templates.to_path_buf(), ..tc }
+    }
+
+    #[tokio::test]
+    async fn documents_without_project_styles_convert_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let before = toolchain_without_style_handlers(tmp.path());
+        let tc = dev_toolchain();
+        let marked = markers::mark_blocks(EVERY_BLOCK).text;
+        for chapters in [false, true] {
+            let options = FragmentOptions { chapters, numeric_only: false };
+            for markdown in [EVERY_BLOCK, marked.as_str(), STYLED] {
+                let expected = fragment_tex_with(&before, markdown, options, "").await;
+                assert_eq!(fragment_tex_with(&tc, markdown, options, "").await, expected);
+                assert_eq!(fragment_tex_with(&tc, markdown, options, "div:unused span:unused-too").await, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_names_the_styled_classes() {
+        assert!(pandoc_metadata(&PaperMeta::default(), false).get(styles::METADATA_KEY).is_none());
+        let meta = PaperMeta { styles: sample_styles(), ..PaperMeta::default() };
+        assert_eq!(pandoc_metadata(&meta, false)[styles::METADATA_KEY], "div:note span:smallcaps");
+    }
+
+    fn sample_styles() -> Vec<styles::Style> {
+        use styles::{Style, StyleKind};
+        vec![
+            Style { name: "note".into(), kind: StyleKind::Paragraph, latex: "\\begin{quote}\n#1\n\\end{quote}".into() },
+            Style { name: "smallcaps".into(), kind: StyleKind::Character, latex: "\\textsc{#1}".into() },
+        ]
+    }
+
+    #[test]
+    fn style_definitions_precede_the_preamble() {
+        let meta = PaperMeta { styles: sample_styles(), ..PaperMeta::default() };
+        let variables = template_variables("", &meta, "\\renewcommand\\pfstylesmallcaps[1]{#1}\n").unwrap();
+        assert_eq!(
+            variables,
+            [(
+                "header-includes",
+                "\\newenvironment{pf-note}{\\begin{quote}}{\\end{quote}}\n\
+                 \\newcommand{\\pfstylesmallcaps}[1]{\\textsc{#1}}\n\
+                 \\renewcommand\\pfstylesmallcaps[1]{#1}"
+                    .into()
+            )]
+        );
+        let only_styles = template_variables("", &meta, "").unwrap();
+        assert!(only_styles[0].1.ends_with("{\\textsc{#1}}"), "{only_styles:?}");
+    }
+
+    #[tokio::test]
+    async fn changing_styles_reconverts_parts_and_the_main_document() {
+        let tc = dev_toolchain();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project::create(dir, None, "article", "", "").unwrap();
+        let build = project::build_dir(dir);
+        std::fs::create_dir_all(&build).unwrap();
+        let meta = project::read_meta(dir).unwrap();
+        let frags = fragments(&meta.parts);
+        let options = FragmentOptions { chapters: false, numeric_only: false };
+        let parts = |classes: &'static str| {
+            let (tc, frags, build) = (&tc, &frags, &build);
+            async move { convert_parts(tc, dir, build, frags, options, classes, "test").await.unwrap().converted }
+        };
+        assert_eq!(parts("").await, 1);
+        assert_eq!(parts("").await, 0);
+        assert_eq!(parts("div:note").await, 1);
+        assert_eq!(parts("div:note").await, 0);
+
+        let main = |meta: PaperMeta| {
+            let (tc, frags, build) = (&tc, &frags, &build);
+            async move {
+                let out = convert_main(tc, dir, build, &meta, frags, None, "test").await.unwrap();
+                assert!(out.success, "{}", out.text);
+                std::fs::read_to_string(build.join(TEX_FILE)).unwrap()
+            }
+        };
+        let mut styled = PaperMeta { styles: sample_styles(), ..meta.clone() };
+        let tex = main(styled.clone()).await;
+        let definition = tex.find("\\newenvironment{pf-note}{\\begin{quote}}{\\end{quote}}").expect("{tex}");
+        assert!(definition < tex.find("\\begin{document}").unwrap());
+        styled.styles[1].latex = "\\textbf{#1}".into();
+        assert!(main(styled).await.contains("\\newcommand{\\pfstylesmallcaps}[1]{\\textbf{#1}}"));
+        assert!(!main(meta).await.contains("pfstyle"));
     }
 
     /// The fragment without its `%PF:N` lines and the blank line Pandoc puts after each.

@@ -5,6 +5,7 @@
 --   {.wide} on a figure/table -> spans both columns (figure* / table*)
 --   tables                    -> table float + tabular (longtable breaks two-column classes)
 --   <!--pf:N--> block markers -> %PF:N comment lines (Markdown line N starts the next block)
+--   ::: {.x} / [..]{.x}       -> \begin{pf-x}...\end{pf-x} / \pfstylex{...} for project styles
 
 local REF_PREFIXES = { fig = true, tbl = true, eq = true, sec = true }
 
@@ -29,8 +30,28 @@ end
 -- Set from metadata for numeric-only BibTeX styles, which cannot print author names.
 local numeric_only = false
 
+-- Styled classes from `pf-styles` metadata (`div:note span:smallcaps`), each mapped to its
+-- LaTeX environment or command name as `styles.rs` defines them in the preamble.
+local div_styles = {}
+local span_styles = {}
+
+local function style_command(name)
+  local encoded = name:gsub("%d", function(d) return string.char(65 + tonumber(d)) end):gsub("%-", "Z")
+  return "\\pfstyle" .. encoded
+end
+
 local function read_meta(meta)
   numeric_only = meta["numeric-only-citations"] == true
+  local spec = meta["pf-styles"]
+  if spec then
+    for kind, name in pandoc.utils.stringify(spec):gmatch("(%a+):([%w%-]+)") do
+      if kind == "div" then
+        div_styles[name] = "pf-" .. name
+      elseif kind == "span" then
+        span_styles[name] = style_command(name)
+      end
+    end
+  end
 end
 
 -- Set for the parts of chapter templates, where a part is one chapter. Every later heading at
@@ -222,6 +243,70 @@ local function Table(tbl)
   return pandoc.RawBlock("latex", table.concat(lines, "\n"))
 end
 
+-- The element's styled classes, in order, and the element without them, or nil when it has none.
+-- Classes the project does not style (Pandoc's own `.smallcaps`, `.mark`, …) stay on it.
+local function split_styles(el, known)
+  local styled, rest = {}, pandoc.List()
+  for _, class in ipairs(el.classes) do
+    if known[class] then
+      table.insert(styled, known[class])
+    else
+      rest:insert(class)
+    end
+  end
+  if #styled == 0 then
+    return nil
+  end
+  el.classes = rest
+  return styled, el
+end
+
+local function Div(el)
+  local styled, inner = split_styles(el, div_styles)
+  if not styled then
+    return nil
+  end
+  local blocks = pandoc.List({ inner })
+  if inner.identifier == "" and #inner.classes == 0 and #inner.attributes == 0 then
+    blocks = inner.content
+  end
+  for i = #styled, 1, -1 do
+    blocks:insert(1, pandoc.RawBlock("latex", "\\begin{" .. styled[i] .. "}"))
+    blocks:insert(pandoc.RawBlock("latex", "\\end{" .. styled[i] .. "}"))
+  end
+  return blocks
+end
+
+local function Span(el)
+  local styled, inner = split_styles(el, span_styles)
+  if not styled then
+    return nil
+  end
+  local inlines = pandoc.List({ inner })
+  if inner.identifier == "" and #inner.classes == 0 and #inner.attributes == 0 then
+    inlines = inner.content
+  end
+  for i = #styled, 1, -1 do
+    inlines:insert(1, pandoc.RawInline("latex", styled[i] .. "{"))
+    inlines:insert(pandoc.RawInline("latex", "}"))
+  end
+  return inlines
+end
+
+-- The reader turns `[x]{.smallcaps}` and `[x]{.underline}` into elements of their own.
+local function styled_element(class)
+  return function(el)
+    local command = span_styles[class]
+    if not command then
+      return nil
+    end
+    local inlines = pandoc.List(el.content)
+    inlines:insert(1, pandoc.RawInline("latex", command .. "{"))
+    inlines:insert(pandoc.RawInline("latex", "}"))
+    return inlines
+  end
+end
+
 local function RawBlock(el)
   if el.format ~= "html" then
     return nil
@@ -234,5 +319,6 @@ end
 
 return {
   { Meta = read_meta, Pandoc = scope_headings_to_file },
-  { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock },
+  { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock, Div = Div, Span = Span,
+    SmallCaps = styled_element("smallcaps"), Underline = styled_element("underline") },
 }

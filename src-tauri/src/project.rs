@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler::{self, TEMPLATE_PARTIALS, TEMPLATES, TEX_FILE};
+use crate::styles::Style;
 
 pub const META_FILE: &str = "paper.json";
 /// The single body file of projects created before documents had parts.
@@ -66,6 +67,9 @@ pub struct PaperMeta {
     pub class_options: Vec<String>,
     /// Project-relative copy of the template made by "Eject template"; empty for the built-in one.
     pub template_file: String,
+    /// Div and span classes typeset with the user's LaTeX.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<Style>,
 }
 
 impl Default for PaperMeta {
@@ -86,6 +90,7 @@ impl Default for PaperMeta {
             toc_depth: 2,
             class_options: Vec::new(),
             template_file: String::new(),
+            styles: Vec::new(),
         }
     }
 }
@@ -1012,6 +1017,24 @@ mod tests {
         assert_eq!(meta.toc_depth, 2);
         assert!(meta.parts.is_empty() && !meta.toc);
         assert!(meta.class_options.is_empty() && meta.template_file.is_empty());
+        assert!(meta.styles.is_empty());
+    }
+
+    #[test]
+    fn meta_round_trips_styles() {
+        use crate::styles::StyleKind;
+        let tmp = blank();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(!raw.contains("\"styles\""), "a project without styles does not list them: {raw}");
+        let mut meta = read_meta(tmp.path()).unwrap();
+        meta.styles = vec![
+            Style { name: "note".into(), kind: StyleKind::Paragraph, latex: "\\begin{quote}#1\\end{quote}".into() },
+            Style { name: "smallcaps".into(), kind: StyleKind::Character, latex: "\\textsc{#1}".into() },
+        ];
+        write_meta(tmp.path(), &meta).unwrap();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(raw.contains("\"kind\": \"paragraph\"") && raw.contains("\"kind\": \"character\""), "{raw}");
+        assert_eq!(read_meta(tmp.path()).unwrap(), meta);
     }
 
     #[test]

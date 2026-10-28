@@ -3,6 +3,7 @@ pub mod bibfetch;
 pub mod compiler;
 pub mod markers;
 pub mod project;
+pub mod styles;
 pub mod synctex;
 pub mod zotero;
 
