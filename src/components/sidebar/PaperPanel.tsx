@@ -6,6 +6,7 @@ import { ejectTemplate, openPreamble, restoreTemplate, updateMeta } from "@/sess
 import { useStore } from "@/store";
 import { notify } from "../Toaster";
 import { Button, Checkbox, Field, Input, Select, Textarea, cx } from "../ui";
+import { PageSetupPanel } from "./PageSetupPanel";
 
 const DEPTH_LABELS = {
   chapters: ["Chapters", "Chapters and sections", "Down to subsections"],
@@ -149,6 +150,8 @@ export function PaperPanel() {
 
       <ContentsSettings />
 
+      <PageSetupPanel />
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="Language">
           <Select className="w-full" value={meta.language} onChange={(e) => updateMeta({ language: e.target.value })}>
@@ -178,6 +181,10 @@ export function PaperPanel() {
   );
 }
 
+function parseOptions(text: string): string[] {
+  return text.split(",").map((o) => o.trim()).filter(Boolean);
+}
+
 function run(task: () => Promise<unknown>) {
   task().catch((e) => notify(String(e), "error"));
 }
@@ -190,8 +197,9 @@ function LatexSettings() {
   const [classOptions, setClassOptions] = useState("");
   const [confirmEject, setConfirmEject] = useState(false);
 
-  // Seeded once per project, like the keywords.
-  useEffect(() => setClassOptions((meta.classOptions ?? []).join(", ")), [dir]);
+  // Seeded per project and when page setup changes the options, but never rewritten while typing.
+  const current = (meta.classOptions ?? []).join(", ");
+  useEffect(() => setClassOptions((text) => (parseOptions(text).join(", ") === current ? text : current)), [dir, current]);
 
   const templateFile = meta.templateFile ?? "";
   const label = templateInfo(meta.template).label;
@@ -207,7 +215,7 @@ function LatexSettings() {
           placeholder="twocolumn, 10pt"
           onChange={(e) => {
             setClassOptions(e.target.value);
-            updateMeta({ classOptions: e.target.value.split(",").map((o) => o.trim()).filter(Boolean) });
+            updateMeta({ classOptions: parseOptions(e.target.value) });
           }}
         />
       </Field>

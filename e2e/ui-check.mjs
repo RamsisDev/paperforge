@@ -641,6 +641,27 @@ console.log(
   (await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd.startsWith("template_")).map((c) => c.cmd))).join(", "),
 );
 
+// Page setup: margins, paper and header from the Paper tab end up in the saved paper.json; a
+// journal template says the journal sets the page.
+const pageSetup = page.getByRole("region", { name: "Page setup" });
+await pageSetup.scrollIntoViewIfNeeded();
+await pageSetup.getByRole("checkbox", { name: "Same on all sides" }).uncheck();
+await pageSetup.getByRole("spinbutton", { name: "Top margin" }).fill("3");
+await pageSetup.getByRole("spinbutton", { name: "Left margin" }).fill("2.2");
+await pageSetup.getByRole("combobox", { name: "Margin unit" }).selectOption("mm");
+await pageSetup.getByRole("combobox", { name: "Paper" }).selectOption("letterpaper");
+await pageSetup.getByRole("combobox", { name: "Line spacing" }).selectOption("onehalf");
+await pageSetup.getByRole("textbox", { name: "Header right" }).fill("Draft {page}");
+await settle(1200);
+await pageSetup.screenshot({ path: join(outDir, "22f-page-setup.png") });
+const savedMeta = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "project_save" && c.args.meta).at(-1)?.args.meta);
+console.log("page setup saved layout:", JSON.stringify(savedMeta?.layout), "· class options:", JSON.stringify(savedMeta?.classOptions));
+console.log("class options field:", await page.getByPlaceholder("twocolumn, 10pt").inputValue());
+await pickTemplate("Thesis / Report", "IEEE");
+await page.getByRole("tab", { name: "Paper", exact: true }).click();
+console.log("IEEE page setup:", await page.getByRole("region", { name: "Page setup" }).locator("p").textContent());
+await pickTemplate("IEEE Conference", "Thesis \\/ Report");
+
 // Writing mode: math, chips and figures render in place, the cursor's line shows its source,
 // and a click on a widget puts the cursor into its source.
 const modeButton = (name) => page.getByRole("group", { name: "Editor mode" }).getByRole("button", { name, exact: true });

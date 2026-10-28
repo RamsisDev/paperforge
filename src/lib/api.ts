@@ -28,6 +28,37 @@ export interface PaperMeta {
   classOptions: string[];
   /** Project copy of the template from "Eject template", e.g. "template/article.tex"; "" for the built-in one. */
   templateFile: string;
+  /** Page setup of the generic templates; paper size, font size and columns are `classOptions`. */
+  layout: Layout;
+}
+
+export type MarginUnit = "cm" | "mm" | "in";
+export type LineSpacing = "single" | "onehalf" | "double";
+export type MainFont = "latinModern" | "termes" | "libertine";
+
+export interface Margins {
+  unit: MarginUnit;
+  top: number;
+  bottom: number;
+  /** The inner margin on two-sided pages. */
+  left: number;
+  right: number;
+}
+
+/** Header or footer text; "{page}" prints the page number. */
+export interface Slots {
+  left: string;
+  center: string;
+  right: string;
+}
+
+export interface Layout {
+  margins: Margins;
+  lineSpacing: LineSpacing;
+  font: MainFont;
+  header: Slots;
+  footer: Slots;
+  lineNumbers: boolean;
 }
 
 export interface Part {

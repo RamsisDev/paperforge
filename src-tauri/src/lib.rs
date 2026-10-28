@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod bibfetch;
 pub mod compiler;
+pub mod layout;
 pub mod markers;
 pub mod project;
 pub mod synctex;

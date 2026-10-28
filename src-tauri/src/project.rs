@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::compiler::{self, TEMPLATE_PARTIALS, TEMPLATES, TEX_FILE};
+use crate::layout::Layout;
 
 pub const META_FILE: &str = "paper.json";
 /// The single body file of projects created before documents had parts.
@@ -66,6 +67,8 @@ pub struct PaperMeta {
     pub class_options: Vec<String>,
     /// Project-relative copy of the template made by "Eject template"; empty for the built-in one.
     pub template_file: String,
+    /// Page setup of the generic templates; journal templates ignore it.
+    pub layout: Layout,
 }
 
 impl Default for PaperMeta {
@@ -86,6 +89,7 @@ impl Default for PaperMeta {
             toc_depth: 2,
             class_options: Vec::new(),
             template_file: String::new(),
+            layout: Layout::default(),
         }
     }
 }
@@ -1012,6 +1016,31 @@ mod tests {
         assert_eq!(meta.toc_depth, 2);
         assert!(meta.parts.is_empty() && !meta.toc);
         assert!(meta.class_options.is_empty() && meta.template_file.is_empty());
+        assert_eq!(meta.layout, Layout::default());
+    }
+
+    #[test]
+    fn meta_round_trips_the_layout() {
+        use crate::layout::{LineSpacing, MainFont, Unit};
+        let tmp = blank();
+        let mut meta = read_meta(tmp.path()).unwrap();
+        meta.layout.margins.unit = Unit::In;
+        meta.layout.margins.left = 1.25;
+        meta.layout.line_spacing = LineSpacing::Double;
+        meta.layout.font = MainFont::Libertine;
+        meta.layout.header.center = "Draft {page}".into();
+        meta.layout.line_numbers = true;
+        save(tmp.path(), Some(&meta), None).unwrap();
+        let raw = fs::read_to_string(tmp.path().join(META_FILE)).unwrap();
+        assert!(raw.contains("\"layout\"") && raw.contains("\"lineSpacing\": \"double\""), "{raw}");
+        assert_eq!(read_meta(tmp.path()).unwrap(), meta);
+
+        fs::write(tmp.path().join(META_FILE), r#"{"layout":{"lineNumbers":true}}"#).unwrap();
+        let partial = read_meta(tmp.path()).unwrap().layout;
+        assert!(partial.line_numbers);
+        assert_eq!(partial.margins, Layout::default().margins);
+        fs::write(tmp.path().join(META_FILE), r#"{"layout":{"lineSpacing":"triple"}}"#).unwrap();
+        assert!(read_meta(tmp.path()).unwrap_err().contains("triple"));
     }
 
     #[test]
