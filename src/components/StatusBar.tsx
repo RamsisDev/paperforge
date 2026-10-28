@@ -1,8 +1,30 @@
-import { CircleAlert, CircleCheck, Cloud, LoaderCircle, TriangleAlert } from "lucide-react";
-import { useDeferredValue, useMemo } from "react";
+import { CircleAlert, CircleCheck, Cloud, LoaderCircle, SpellCheck, TriangleAlert } from "lucide-react";
+import { useDeferredValue, useMemo, useSyncExternalStore } from "react";
+import { dictionaryFor, onSpellSettings, setSpellCheck, spellCheckEnabled } from "@/editor/spell";
 import { partInfo, totalWords } from "@/lib/parts";
 import { LANGUAGES, templateInfo, unitName } from "@/lib/templates";
 import { openGallery, store, useStore } from "@/store";
+
+function SpellToggle({ language, label }: { language: string; label: string }) {
+  const enabled = useSyncExternalStore(onSpellSettings, spellCheckEnabled);
+  const supported = dictionaryFor(language) !== null;
+  const title = !enabled
+    ? "Spell check is off. Click to turn it on"
+    : supported
+      ? `Checking spelling in ${label}. Click to turn it off`
+      : `No spelling dictionary for ${label} yet. Click to turn spell check off`;
+  return (
+    <button
+      className={`flex items-center rounded px-1 hover:bg-raised hover:text-fg cursor-default ${enabled && supported ? "" : "text-faint"}`}
+      title={title}
+      aria-label="Spell check"
+      aria-pressed={enabled}
+      onClick={() => setSpellCheck(!enabled)}
+    >
+      <SpellCheck size={12} className={enabled ? "" : "opacity-50"} />
+    </button>
+  );
+}
 
 export function StatusBar() {
   const compile = useStore((s) => s.compile);
@@ -81,6 +103,12 @@ export function StatusBar() {
         </button>
       )}
       {meta && <span>{LANGUAGES.find((l) => l.id === meta.language)?.label ?? meta.language}</span>}
+      {meta && (
+        <SpellToggle
+          language={meta.language}
+          label={LANGUAGES.find((l) => l.id === meta.language)?.label ?? meta.language}
+        />
+      )}
     </footer>
   );
 }
