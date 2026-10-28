@@ -272,6 +272,23 @@ await shot("06d-chapter-workspace");
 console.log("chapter card (text x relative to the title):", await cardOutline());
 console.log("chapter badges:", JSON.stringify(await badges()));
 
+// Outline folding: a gutter click folds one heading's section and keeps its chapter badge;
+// Mod-Alt-[ folds every top-level section, Mod-Alt-] unfolds them all.
+const foldedCount = () => page.locator(".cm-foldPlaceholder").count();
+const foldGutter = await page.locator(".pf-fold-gutter").boundingBox();
+const subtemaLine = await page.locator(".cm-line", { hasText: "Subtema" }).boundingBox();
+await page.mouse.click(foldGutter.x + foldGutter.width / 2, subtemaLine.y + 8);
+await settle(200);
+await page.screenshot({ path: join(outDir, "06e-folded-heading.png"), clip: { ...editorBox, height: 200 } });
+console.log("folded ranges after a gutter click:", await foldedCount(), "· badges", JSON.stringify(await badges()));
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+Alt+BracketLeft");
+await settle(200);
+const foldedAll = await foldedCount();
+await page.keyboard.press("ControlOrMeta+Alt+BracketRight");
+await settle(200);
+console.log("fold all:", foldedAll, "ranges · after unfold all:", await foldedCount());
+
 // A contents entry opens the PDF at its page and the Markdown at its heading.
 await page.getByRole("list", { name: "Table of contents" }).getByRole("button", { name: /Results/ }).click();
 await settle(900);
@@ -515,6 +532,18 @@ console.log(
   "after adding to the project dictionary:",
   JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "dictionary_add").map((c) => c.args.words))),
 );
+
+// Word goals, set from the status bar counter.
+const wordCounter = page.locator("footer").getByRole("button", { name: "Word count" });
+await wordCounter.click();
+const goalDialog = page.getByRole("dialog", { name: "Word goals" });
+await goalDialog.getByRole("spinbutton", { name: /Document goal/ }).fill("5000");
+await goalDialog.getByRole("spinbutton", { name: /Session goal/ }).fill("200");
+await shot("22b-word-goal-popover");
+await goalDialog.getByRole("button", { name: "Set goal" }).click();
+await settle(200);
+await page.locator("footer").screenshot({ path: join(outDir, "22c-word-goal-status.png") });
+console.log("status bar with word goals:", await wordCounter.textContent());
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer.
