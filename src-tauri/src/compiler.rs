@@ -17,11 +17,15 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::markers::{self, BlockMap, Marked};
-use crate::project::{self, BIB_FILE, BUILD_DIR, PaperMeta};
+use crate::project::{self, BIB_FILE, BUILD_DIR, PREAMBLE_FILE, PaperMeta};
 
 /// The default relay redirects to a mirror that is unreachable; this host serves the same bundle.
 pub const BUNDLE_URL: &str = "https://data1.fullyjustified.net/tlextras-2022.0r0.tar";
 pub const TEMPLATES: [&str; 7] = ["article", "ieee", "acm", "elsevier", "lncs", "report", "book"];
+/// Files every template pulls in with `$name()$`; Pandoc looks for them next to the template.
+pub const TEMPLATE_PARTIALS: [&str; 2] = ["common.tex", "contents.tex"];
+/// A template line listing its default `\documentclass` options: `$-- classoption: 11pt, a4paper`.
+const CLASS_OPTION_DEFAULTS: &str = "$-- classoption:";
 /// Templates whose `#` headings are chapters; each part becomes an `\include`d file.
 const CHAPTER_TEMPLATES: [&str; 2] = ["report", "book"];
 pub const TEX_FILE: &str = "paper.tex";
@@ -298,6 +302,78 @@ const NUMERIC_ONLY_DEFAULT_STYLES: [&str; 1] = ["lncs"];
 
 fn numeric_only_citations(meta: &PaperMeta) -> bool {
     meta.bib_style.trim().is_empty() && NUMERIC_ONLY_DEFAULT_STYLES.contains(&meta.template.as_str())
+}
+
+/// The template Pandoc renders: the project's ejected copy, or the built-in one.
+fn template_path(tc: &Toolchain, dir: &Path, meta: &PaperMeta) -> Result<PathBuf, String> {
+    if meta.template_file.is_empty() {
+        Ok(tc.templates.join(format!("{}.tex", meta.template)))
+    } else {
+        project::template_file_path(dir, &meta.template_file)
+    }
+}
+
+fn default_class_options(template: &str) -> Vec<String> {
+    template
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(CLASS_OPTION_DEFAULTS))
+        .map(|list| list.split(',').map(str::trim).filter(|o| !o.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// Class options that exclude each other share a kind; options without one simply add up.
+fn option_kind(option: &str) -> Option<String> {
+    if let Some((key, _)) = option.split_once('=') {
+        return Some(format!("{}=", key.trim()));
+    }
+    let size = option
+        .strip_suffix("pt")
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.'));
+    let kind = match option {
+        _ if size => "size",
+        o if o.ends_with("paper") => "paper",
+        "oneside" | "twoside" => "sides",
+        "onecolumn" | "twocolumn" => "columns",
+        "draft" | "final" => "draft",
+        "titlepage" | "notitlepage" => "titlepage",
+        "openright" | "openany" => "open",
+        "portrait" | "landscape" => "orientation",
+        _ => return None,
+    };
+    Some(kind.to_string())
+}
+
+/// The template's default options with the paper's merged in. A class processes its options in
+/// its own order, not the document's, so `[11pt,10pt]` would not mean 10pt: a paper option
+/// replaces the default of the same kind instead of following it.
+fn class_options(template: &str, chosen: &[String]) -> Result<Vec<String>, String> {
+    let chosen: Vec<&str> = chosen.iter().map(|o| o.trim()).filter(|o| !o.is_empty()).collect();
+    let invalid = |o: &&&str| o.contains(|c: char| c.is_whitespace() || c.is_control() || "[]{},%\\#$&^~".contains(c));
+    if let Some(bad) = chosen.iter().find(invalid) {
+        return Err(format!("'{bad}' is not a valid class option"));
+    }
+    let replaced: HashSet<String> = chosen.iter().filter_map(|o| option_kind(o)).collect();
+    let mut options: Vec<String> = default_class_options(template)
+        .into_iter()
+        .filter(|o| option_kind(o).is_none_or(|kind| !replaced.contains(&kind)))
+        .collect();
+    for option in chosen {
+        if !options.iter().any(|o| o == option) {
+            options.push(option.to_string());
+        }
+    }
+    Ok(options)
+}
+
+/// `--variable` values of the main document, which Pandoc inserts verbatim: the class options
+/// and the project's `preamble.tex` (at the end of the preamble, via `$header-includes$`).
+fn template_variables(template: &str, meta: &PaperMeta, preamble: &str) -> Result<Vec<(&'static str, String)>, String> {
+    let mut variables: Vec<(&'static str, String)> =
+        class_options(template, &meta.class_options)?.into_iter().map(|o| ("classoption", o)).collect();
+    if !preamble.trim().is_empty() {
+        variables.push(("header-includes", preamble.trim_end().to_string()));
+    }
+    Ok(variables)
 }
 
 struct RunOutput {
@@ -609,11 +685,13 @@ pub async fn compile(
     }
     let build = project::build_dir(dir);
     tokio::fs::create_dir_all(&build).await.map_err(|e| e.to_string())?;
-    // A class's .aux commands are not defined in another class.
+    // A class's .aux commands are not defined in another class, and an ejected copy may load
+    // another class.
     let stamp = build.join(TEMPLATE_STAMP);
-    if read_or_empty(&stamp).await != meta.template {
+    let template_id = format!("{}\n{}", meta.template, meta.template_file);
+    if read_or_empty(&stamp).await != template_id {
         remove_intermediates(&build).await;
-        tokio::fs::write(&stamp, &meta.template).await.map_err(|e| e.to_string())?;
+        tokio::fs::write(&stamp, &template_id).await.map_err(|e| e.to_string())?;
     }
     let chapters = uses_chapters(&meta.template);
     let fragments = fragments(&meta.parts);
@@ -697,12 +775,23 @@ async fn convert_main(
     let has_bib = tokio::fs::metadata(dir.join(BIB_FILE)).await.is_ok_and(|m| m.len() > 0);
     let meta_json = serde_json::to_vec(&pandoc_metadata(meta, has_bib)).expect("json");
     let markdown = main_markdown(fragments, uses_chapters(&meta.template));
-    let templates = templates_fingerprint(&tc.templates).await;
+    let template = &template_path(tc, dir, meta)?;
+    let template_text = tokio::fs::read_to_string(template)
+        .await
+        .map_err(|e| format!("{}: {e}", template.display()))?;
+    let preamble = read_or_empty(&dir.join(PREAMBLE_FILE)).await;
+    let variables = template_variables(&template_text, meta, &preamble)?;
+    let mut templates = templates_fingerprint(&tc.templates).await;
+    if let Some(own) = template.parent().filter(|p| *p != tc.templates) {
+        templates.extend(templates_fingerprint(own).await);
+    }
     let key = cache_key(&[
         pandoc_id.as_bytes(),
         meta.template.as_bytes(),
+        template.as_os_str().as_encoded_bytes(),
         &templates,
         &meta_json,
+        &serde_json::to_vec(&variables).expect("json"),
         markdown.as_bytes(),
         includeonly.unwrap_or_default().as_bytes(),
     ]);
@@ -711,21 +800,30 @@ async fn convert_main(
     }
     tokio::fs::write(build.join(META_JSON), meta_json).await.map_err(|e| e.to_string())?;
     tokio::fs::write(build.join(MAIN_MARKDOWN), markdown).await.map_err(|e| e.to_string())?;
-    let cmd = pandoc_main(tc, build, &meta.template, includeonly);
+    let cmd = pandoc_main(tc, build, template, &variables, includeonly);
     run_cached(build, MAIN_STEM, key, cmd, None).await.map(|(out, _)| out)
 }
 
-fn pandoc_main(tc: &Toolchain, build: &Path, template: &str, includeonly: Option<&str>) -> Command {
+fn pandoc_main(
+    tc: &Toolchain,
+    build: &Path,
+    template: &Path,
+    variables: &[(&str, String)],
+    includeonly: Option<&str>,
+) -> Command {
     let mut cmd = Command::new(&tc.pandoc);
     cmd.current_dir(build)
         .arg(MAIN_MARKDOWN)
         .args(["--from", "markdown", "--to", "latex", "--standalone", "--natbib"])
         .arg("--wrap=preserve")
-        .arg(format!("--template={}", tc.templates.join(format!("{template}.tex")).display()))
+        .arg(format!("--template={}", template.display()))
         // The filter also applies to the metadata (abstract, title).
         .arg(format!("--lua-filter={}", tc.templates.join("paper.lua").display()))
         .arg(format!("--metadata-file={META_JSON}"))
         .arg(format!("--output={TEX_FILE}"));
+    for (name, value) in variables {
+        cmd.arg(format!("--variable={name}:{value}"));
+    }
     if let Some(name) = includeonly {
         cmd.arg(format!("--variable=includeonly:{name}"));
     }
@@ -1176,6 +1274,93 @@ mod tests {
         assert_eq!(doc["toc-depth"], 3);
         let report = PaperMeta { template: "report".into(), toc_depth: 1, ..article };
         assert_eq!(pandoc_metadata(&report, false)["toc-depth"], 0);
+    }
+
+    fn options(list: &[&str]) -> Vec<String> {
+        list.iter().map(|o| o.to_string()).collect()
+    }
+
+    #[test]
+    fn class_options_replace_defaults_of_the_same_kind() {
+        let article = "$-- classoption: 11pt, a4paper\n\\documentclass[$for(classoption)$$classoption$$sep$,$endfor$]{article}";
+        assert_eq!(class_options(article, &[]).unwrap(), ["11pt", "a4paper"]);
+        let chosen = options(&[" 10pt ", "twocolumn", "", "letterpaper", "twocolumn"]);
+        assert_eq!(class_options(article, &chosen).unwrap(), ["10pt", "twocolumn", "letterpaper"]);
+
+        let ieee = "$-- classoption: conference\n";
+        assert_eq!(class_options(ieee, &options(&["10pt"])).unwrap(), ["conference", "10pt"]);
+        let koma = "$-- classoption: fontsize=11pt, DIV=12\n";
+        assert_eq!(class_options(koma, &options(&["fontsize=12pt"])).unwrap(), ["DIV=12", "fontsize=12pt"]);
+        assert_eq!(class_options("\\documentclass{article}", &options(&["draft"])).unwrap(), ["draft"]);
+
+        for bad in ["two words", "a,b", "x]{evil}", "\\relax", "50%"] {
+            assert!(class_options(article, &options(&[bad])).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_template_declares_its_default_class_options() {
+        let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/templates");
+        for template in TEMPLATES {
+            let text = std::fs::read_to_string(templates.join(format!("{template}.tex"))).unwrap();
+            assert!(!default_class_options(&text).is_empty(), "{template}");
+            assert!(text.contains("\\documentclass[$for(classoption)$$classoption$$sep$,$endfor$]"), "{template}");
+        }
+    }
+
+    #[test]
+    fn preamble_becomes_header_includes() {
+        let meta = PaperMeta { class_options: options(&["twocolumn"]), ..PaperMeta::default() };
+        let variables = template_variables("$-- classoption: 11pt\n", &meta, "\\newcommand\\pf{PF}\n\n").unwrap();
+        assert_eq!(
+            variables,
+            [("classoption", "11pt".into()), ("classoption", "twocolumn".into()), ("header-includes", "\\newcommand\\pf{PF}".into())]
+        );
+        assert_eq!(template_variables("", &PaperMeta::default(), " \n").unwrap(), []);
+    }
+
+    #[tokio::test]
+    async fn main_document_uses_the_ejected_template_preamble_and_class_options() {
+        let tc = dev_toolchain();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project::create(dir, None, "article", "", "").unwrap();
+        let build = project::build_dir(dir);
+        std::fs::create_dir_all(&build).unwrap();
+        let mut meta = project::read_meta(dir).unwrap();
+        meta.class_options = options(&["10pt", "twocolumn"]);
+        let frags = fragments(&meta.parts);
+        let main = |meta: PaperMeta| {
+            let (tc, frags, build) = (&tc, &frags, &build);
+            async move {
+                let out = convert_main(tc, dir, build, &meta, frags, None, "test").await.unwrap();
+                assert!(out.success, "{}", out.text);
+                std::fs::read_to_string(build.join(TEX_FILE)).unwrap()
+            }
+        };
+
+        let tex = main(meta.clone()).await;
+        assert!(tex.starts_with("\\documentclass[a4paper,10pt,twocolumn]{article}"), "{tex}");
+
+        std::fs::write(dir.join(PREAMBLE_FILE), "\\newcommand\\pfmacro{From the preamble}\n").unwrap();
+        let tex = main(meta.clone()).await;
+        let preamble = tex.find("\\newcommand\\pfmacro").expect("the preamble is included");
+        assert!(preamble > tex.find("\\usepackage{amsmath}").unwrap() && preamble < tex.find("\\begin{document}").unwrap());
+
+        let ejected = project::eject_template(dir, &tc.templates).unwrap().meta;
+        let local = dir.join(&ejected.template_file);
+        let text = std::fs::read_to_string(&local).unwrap();
+        std::fs::write(&local, text.replace("\\begin{document}", "% ejected copy\n\\begin{document}")).unwrap();
+        let tex = main(PaperMeta { template_file: ejected.template_file.clone(), ..meta.clone() }).await;
+        assert!(tex.contains("% ejected copy") && tex.contains("\\pfmacro"), "{tex}");
+
+        let partial = dir.join(project::TEMPLATE_DIR).join("common.tex");
+        std::fs::write(&partial, std::fs::read_to_string(&partial).unwrap() + "% edited partial\n").unwrap();
+        let tex = main(PaperMeta { template_file: ejected.template_file.clone(), ..meta.clone() }).await;
+        assert!(tex.contains("% edited partial"), "an edited partial invalidates the cache");
+
+        let escaping = PaperMeta { template_file: "../article.tex".into(), ..meta };
+        assert!(convert_main(&tc, dir, &build, &escaping, &frags, None, "test").await.is_err());
     }
 
     #[test]

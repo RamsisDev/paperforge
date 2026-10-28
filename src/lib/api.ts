@@ -24,6 +24,10 @@ export interface PaperMeta {
   lot: boolean;
   /** 1..3 */
   tocDepth: number;
+  /** `\documentclass` options; each replaces the template's default of the same kind. */
+  classOptions: string[];
+  /** Project copy of the template from "Eject template", e.g. "template/article.tex"; "" for the built-in one. */
+  templateFile: string;
 }
 
 export interface Part {
@@ -37,6 +41,8 @@ export interface ProjectSnapshot {
   parts: Part[];
   bib: string;
   figures: string[];
+  /** `preamble.tex`, null until created. */
+  preamble: string | null;
 }
 
 export type Severity = "error" | "warning";
@@ -152,6 +158,10 @@ export const api = {
   /** A pasted figure: `data` is base64. Returns the project-relative path. */
   importFigureBytes: (dir: string, name: string, data: string) =>
     invoke<string>("figure_import_bytes", { dir, name, data }),
+  savePreamble: (dir: string, content: string) => invoke<void>("preamble_save", { dir, content }),
+  /** Copies the template into the project's template/ folder and compiles with that copy. */
+  ejectTemplate: (dir: string) => invoke<ProjectSnapshot>("template_eject", { dir }),
+  restoreTemplate: (dir: string) => invoke<ProjectSnapshot>("template_restore", { dir }),
 };
 
 export interface FolderListing {

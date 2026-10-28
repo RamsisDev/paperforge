@@ -382,6 +382,60 @@ async fn latex_errors_point_at_the_fragment_line() {
     }
 }
 
+fn main_tex(dir: &Path) -> String {
+    std::fs::read_to_string(project::build_dir(dir).join("paper.tex")).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn project_preamble_and_class_options_apply() {
+    for (template, class) in [("article", "\\documentclass[a4paper,10pt,twocolumn]{article}"), ("ieee", "\\documentclass[conference,10pt,twocolumn]{IEEEtran}")] {
+        let tmp = sample_project(template, "");
+        project::save_preamble(tmp.path(), "\\newcommand\\pfname{PaperForge}\n").unwrap();
+        edit_part(tmp.path(), INTRO, |c| c.replace("Cite with", "\\pfname{} lets you cite with"));
+        update_meta(tmp.path(), |m| m.class_options = vec!["10pt".into(), "twocolumn".into()]);
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        let tex = main_tex(tmp.path());
+        assert!(tex.starts_with(class), "{template}: {}", tex.lines().next().unwrap());
+        assert!(tex.contains("\\newcommand\\pfname{PaperForge}"));
+
+        project::save_preamble(tmp.path(), "").unwrap();
+        let broken = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(!broken.ok, "{template}: a removed macro must break the next compile");
+        assert!(errors(&broken)[0].message.contains("Undefined control sequence"), "{:#?}", errors(&broken));
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn ejected_template_compiles_and_restores() {
+    let tc = toolchain();
+    for template in ["article", "report"] {
+        let tmp = sample_project(template, "");
+        assert!(compile(tmp.path(), CompileMode::Full, None).await.ok);
+
+        let meta = project::eject_template(tmp.path(), &tc.templates).unwrap().meta;
+        let local = tmp.path().join(&meta.template_file);
+        let text = std::fs::read_to_string(&local).unwrap();
+        std::fs::write(&local, text.replace("\\begin{document}", "\\newcommand\\pfejected{Ejected}\n\\begin{document}")).unwrap();
+        edit_part(tmp.path(), INTRO, |c| c.replace("Cite with", "\\pfejected{} cite with"));
+        update_meta(tmp.path(), |m| m.class_options = vec!["draft".into()]);
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        let tex = main_tex(tmp.path());
+        assert!(tex.contains("\\pfejected") && tex.lines().next().unwrap().contains("draft"), "{template}");
+
+        project::restore_template(tmp.path()).unwrap();
+        let restored = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(!restored.ok, "{template}: the built-in template lacks the ejected macro");
+        assert!(!main_tex(tmp.path()).contains("\\pfejected"));
+    }
+}
+
 #[tokio::test]
 #[ignore = "runs the TeX toolchain"]
 async fn sample_labels_get_their_numbers_and_pages() {

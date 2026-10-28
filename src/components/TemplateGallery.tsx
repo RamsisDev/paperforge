@@ -177,14 +177,18 @@ function CreateForm({ onClose }: { onClose: () => void }) {
 
 function ChangeForm({ onClose }: { onClose: () => void }) {
   const current = useStore((s) => s.meta?.template ?? "article");
+  const templateFile = useStore((s) => s.meta?.templateFile ?? "");
   return (
     <div className="flex min-h-0 flex-col">
-      <p className="shrink-0 px-5 pt-1 text-xs text-muted">Your text stays the same; only the layout changes.</p>
+      <p className="shrink-0 px-5 pt-1 text-xs text-muted">
+        Your text stays the same; only the layout changes.
+        {templateFile && ` Another template replaces your copy in ${templateFile}, which stays on disk.`}
+      </p>
       <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
         <Gallery
           value={current}
           onPick={(template) => {
-            if (template !== current) updateMeta({ template });
+            if (template !== current) updateMeta({ template, templateFile: "" });
             onClose();
           }}
         />

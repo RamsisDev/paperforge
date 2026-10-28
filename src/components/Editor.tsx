@@ -1,13 +1,20 @@
 import { isolateHistory } from "@codemirror/commands";
 import { setDiagnostics, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
-import { EditorSelection, EditorState, type ChangeSpec, type TransactionSpec } from "@codemirror/state";
+import { EditorSelection, EditorState, type ChangeSpec, type Extension, type TransactionSpec } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { editorBridge } from "@/editor/bridge";
-import { bibExtensions, flashLine, markdownExtensions, syncChapterTemplate, texExtensions } from "@/editor/extensions";
+import {
+  bibExtensions,
+  flashLine,
+  latexSourceExtensions,
+  markdownExtensions,
+  syncChapterTemplate,
+  texExtensions,
+} from "@/editor/extensions";
 import { locate } from "@/lib/diagnostics";
-import { setBib, setPart } from "@/session";
-import { BIB_FILE, TEX_FILE, openFind, store, useStore, type EditorFile } from "@/store";
+import { setBib, setPart, setPreamble } from "@/session";
+import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, openFind, store, useStore, type EditorFile } from "@/store";
 
 type Contents = Map<EditorFile, string>;
 
@@ -15,7 +22,21 @@ function contents(s: ReturnType<typeof store.get>): Contents {
   const map: Contents = new Map(s.parts.map((p) => [p.file, p.content]));
   map.set(BIB_FILE, s.bib);
   map.set(TEX_FILE, s.tex);
+  if (s.preamble !== null) map.set(PREAMBLE_FILE, s.preamble);
   return map;
+}
+
+function storeText(file: EditorFile, text: string) {
+  if (file === BIB_FILE) setBib(text);
+  else if (file === PREAMBLE_FILE) setPreamble(text);
+  else if (file !== TEX_FILE) setPart(file, text);
+}
+
+function extensionsFor(file: EditorFile, onChange: Extension) {
+  if (file === BIB_FILE) return bibExtensions(onChange);
+  if (file === TEX_FILE) return texExtensions();
+  if (file === PREAMBLE_FILE) return latexSourceExtensions(onChange);
+  return markdownExtensions(onChange);
 }
 
 export function Editor() {
@@ -36,8 +57,7 @@ export function Editor() {
       if (u.docChanged && !applyingExternal.current) {
         const text = u.state.doc.toString();
         emitted.current.set(file, text);
-        if (file === BIB_FILE) setBib(text);
-        else if (file !== TEX_FILE) setPart(file, text);
+        storeText(file, text);
       }
       if (u.selectionSet || u.docChanged) {
         const head = u.state.selection.main.head;
@@ -45,9 +65,7 @@ export function Editor() {
         store.set({ cursor: { line: line.number, col: head - line.from + 1 } });
       }
     });
-    const extensions =
-      file === BIB_FILE ? bibExtensions(onChange) : file === TEX_FILE ? texExtensions() : markdownExtensions(onChange);
-    return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions });
+    return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions: extensionsFor(file, onChange) });
   }
 
   /** Edits a file through its own state, so Mod-Z in that file undoes the edit. */
@@ -66,8 +84,7 @@ export function Editor() {
     states.current.set(file, next);
     const value = next.doc.toString();
     emitted.current.set(file, value);
-    if (file === BIB_FILE) setBib(value);
-    else setPart(file, value);
+    storeText(file, value);
   }
 
   // One view per project; documents swap underneath it.
@@ -128,7 +145,8 @@ export function Editor() {
     () =>
       useStore.subscribe((s, prev) => {
         const view = viewRef.current;
-        if (!view || (s.parts === prev.parts && s.bib === prev.bib && s.tex === prev.tex)) return;
+        const unchanged = s.parts === prev.parts && s.bib === prev.bib && s.tex === prev.tex && s.preamble === prev.preamble;
+        if (!view || unchanged) return;
         const now = contents(s);
         const before = contents(prev);
         for (const file of before.keys()) if (!now.has(file)) states.current.delete(file);
