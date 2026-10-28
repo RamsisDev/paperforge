@@ -41,9 +41,19 @@ import { baseName } from "@/lib/api";
 import { splitLevel } from "@/lib/parts";
 import { templateInfo, unitName } from "@/lib/templates";
 import { closeProject, compileNow, splitPart } from "@/session";
-import { askNewPart, isPartFile, openGallery, setTheme, showContentsSettings, store, useStore } from "@/store";
+import {
+  askNewPart,
+  isPartFile,
+  openGallery,
+  setEditorMode,
+  setTheme,
+  showContentsSettings,
+  store,
+  useStore,
+  type EditorMode,
+} from "@/store";
 import { notify } from "./Toaster";
-import { Button, IconButton, MENU_SEPARATOR, MOD, Menu, SHIFT, type MenuItem } from "./ui";
+import { Button, IconButton, MENU_SEPARATOR, MOD, Menu, SHIFT, cx, type MenuItem } from "./ui";
 
 type Action = keyof typeof formatting;
 
@@ -137,6 +147,35 @@ function documentMenu(template: Parameters<typeof templateInfo>[0], editingMarkd
   ];
 }
 
+const MODES: { mode: EditorMode; label: string; title: string }[] = [
+  { mode: "writing", label: "Writing", title: "Writing mode: math, figures and citations rendered in place" },
+  { mode: "source", label: "Source", title: "Source mode: the Markdown as typed" },
+];
+
+function ModeSwitch({ disabled }: { disabled: boolean }) {
+  const current = useStore((s) => s.editorMode);
+  return (
+    <div role="group" aria-label="Editor mode" className="flex shrink-0 items-center rounded-md bg-raised p-0.5">
+      {MODES.map(({ mode, label, title }) => (
+        <button
+          key={mode}
+          type="button"
+          aria-pressed={current === mode}
+          title={title}
+          disabled={disabled}
+          onClick={() => setEditorMode(mode)}
+          className={cx(
+            "h-6 rounded px-2 text-xs font-medium transition-colors cursor-default disabled:opacity-50",
+            current === mode ? "bg-panel text-fg shadow-sm" : "text-muted hover:text-fg",
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function Toolbar() {
   const dir = useStore((s) => s.dir);
   const meta = useStore((s) => s.meta);
@@ -184,6 +223,7 @@ export function Toolbar() {
       </div>
 
       <div className="flex-1" />
+      <ModeSwitch disabled={!editingMarkdown} />
       {meta && (
         <Menu
           className="shrink-0"

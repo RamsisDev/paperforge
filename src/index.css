@@ -277,6 +277,160 @@ textarea,
   cursor: default;
 }
 
+/* Writing mode (src/editor/livepreview) */
+:root .cm-editor.pf-writing .cm-scroller {
+  font-family: var(--font-sans);
+  font-size: 15px;
+}
+:root .cm-editor.pf-writing .pf-lp-heading {
+  line-height: 1.35;
+  padding-top: 0.5em;
+  padding-bottom: 0.15em;
+}
+:root .cm-editor.pf-writing .pf-lp-h1 {
+  font-size: 1.5em;
+}
+:root .cm-editor.pf-writing .pf-lp-h2 {
+  font-size: 1.3em;
+}
+:root .cm-editor.pf-writing .pf-lp-h3 {
+  font-size: 1.15em;
+}
+:root .cm-editor.pf-writing .pf-lp-h4,
+:root .cm-editor.pf-writing .pf-lp-h5,
+:root .cm-editor.pf-writing .pf-lp-h6 {
+  font-size: 1.05em;
+}
+:root .cm-editor.pf-writing .pf-lp-quote {
+  border-left: 3px solid var(--pf-line);
+  padding-left: 14px;
+}
+:root .cm-editor.pf-writing .pf-lp-code,
+:root .cm-editor.pf-writing .pf-lp-raw {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--pf-raised);
+}
+:root .cm-editor.pf-writing .pf-lp-raw {
+  background: color-mix(in srgb, var(--pf-syn-math) 7%, transparent);
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--pf-syn-math) 45%, transparent);
+}
+:root .cm-editor.pf-writing .pf-lp-raw-inline {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--pf-syn-math) 9%, transparent);
+}
+:root .cm-editor.pf-writing .pf-lp-div {
+  color: var(--pf-faint);
+}
+.pf-lp-fence {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.6;
+  color: var(--pf-muted);
+  background: var(--pf-raised);
+  cursor: text;
+}
+.pf-lp-fence-raw {
+  color: var(--pf-syn-math);
+  background: color-mix(in srgb, var(--pf-syn-math) 12%, transparent);
+}
+.pf-lp-chip {
+  display: inline-block;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 0.86em;
+  line-height: 1.45;
+  vertical-align: 0.05em;
+  white-space: nowrap;
+  cursor: text;
+}
+.pf-lp-cite {
+  color: var(--pf-syn-cite);
+  background: color-mix(in srgb, var(--pf-syn-cite) 12%, transparent);
+}
+.pf-lp-ref {
+  color: var(--pf-syn-link);
+  background: color-mix(in srgb, var(--pf-syn-link) 11%, transparent);
+}
+.pf-lp-footnote {
+  font-size: 0.72em;
+  vertical-align: 0.5em;
+  color: var(--pf-syn-emph);
+  background: color-mix(in srgb, var(--pf-syn-emph) 11%, transparent);
+}
+.pf-lp-attr {
+  font-size: 0.72em;
+  color: var(--pf-faint);
+  background: var(--pf-raised);
+}
+.pf-lp-chip.pf-lp-missing {
+  color: var(--pf-danger);
+  background: color-mix(in srgb, var(--pf-danger) 10%, transparent);
+}
+.pf-lp-math {
+  cursor: text;
+}
+.pf-lp-math-display {
+  position: relative;
+  display: block;
+  padding: 2px 4.5em 2px 0;
+  text-align: center;
+}
+.pf-lp-math-display .katex-display {
+  margin: 0.3em 0;
+}
+.pf-lp-eqno {
+  position: absolute;
+  right: 0.5em;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.92em;
+  color: var(--pf-muted);
+}
+.pf-lp-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  cursor: text;
+}
+.pf-lp-figure-frame {
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+  min-height: 2em;
+}
+.pf-lp-figure-frame img {
+  max-width: 100%;
+  max-height: 420px;
+  border-radius: 4px;
+}
+.pf-lp-figure-missing {
+  align-items: center;
+  padding: 18px 24px;
+  border: 1px dashed var(--pf-line);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--pf-faint);
+}
+.pf-lp-caption {
+  max-width: 90%;
+  font-size: 0.9em;
+  text-align: center;
+  color: var(--pf-muted);
+}
+
 /* PDF preview */
 .pf-page {
   position: relative;
