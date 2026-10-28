@@ -193,7 +193,7 @@ const lastStructureCall = () =>
   });
 
 // Welcome, then a new project through the template gallery.
-await page.goto("http://localhost:1420/");
+await page.goto(process.env.PF_URL ?? "http://localhost:1420/");
 await page.getByRole("button", { name: /New paper/ }).waitFor();
 await settle(200);
 await shot("01-welcome");
