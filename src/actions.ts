@@ -1,7 +1,8 @@
 import { notify } from "@/components/Toaster";
 import { api, baseName, joinPath, type TemplateId } from "@/lib/api";
 import { pickFolder, revealInFileManager, saveOutput } from "@/lib/platform";
-import { compileNow, loadProject } from "@/session";
+import { versionAfterExport } from "@/history";
+import { compileNow, leaveProject, loadProject } from "@/session";
 import { store } from "@/store";
 
 function slug(title: string): string {
@@ -34,7 +35,9 @@ export async function exportPdf() {
     write: (dest) => api.exportPdf(dir, dest),
     read: () => api.readBinary(joinPath(dir, ".build/paper.pdf")),
   });
-  if (saved) notify(`Saved ${baseName(saved)}`);
+  if (!saved) return;
+  notify(`Saved ${baseName(saved)}`);
+  versionAfterExport("PDF");
 }
 
 /** The review PDF: comments highlighted with their notes, tracked changes marked. */
@@ -48,7 +51,9 @@ export async function exportReviewPdf() {
     write: (dest) => api.exportPdf(dir, dest, true),
     read: () => api.readBinary(joinPath(dir, ".build/review/paper.pdf")),
   });
-  if (saved) notify(`Saved ${baseName(saved)}`);
+  if (!saved) return;
+  notify(`Saved ${baseName(saved)}`);
+  versionAfterExport("Review PDF");
 }
 
 export async function exportLatex() {
@@ -65,7 +70,9 @@ export async function exportLatex() {
       return api.readBinary(staged);
     },
   });
-  if (saved) notify(`Saved ${baseName(saved)} — ready to upload to Overleaf or a journal`);
+  if (!saved) return;
+  notify(`Saved ${baseName(saved)} — ready to upload to Overleaf or a journal`);
+  versionAfterExport("LaTeX");
 }
 
 export async function revealProject() {
@@ -81,6 +88,7 @@ export async function openProjectDialog() {
 
 export async function openProjectAt(dir: string) {
   try {
+    if (store.get().dir) await leaveProject();
     loadProject(await api.openProject(dir));
   } catch (e) {
     notify(String(e), "error");

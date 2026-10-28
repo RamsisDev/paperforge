@@ -23,6 +23,7 @@ import {
   type EditorFile,
 } from "@/store";
 import { rememberProject } from "@/lib/recent";
+import { historyOpened, noteSaved, structureChanged, versionOnLeave } from "@/history";
 
 const SAVE_DELAY_MS = 300;
 const COMPILE_DELAY_MS = 150;
@@ -40,7 +41,7 @@ let compileTimer: ReturnType<typeof setTimeout> | undefined;
 let compileSeq = 0;
 let queue: Promise<unknown> = Promise.resolve();
 
-function serial<T>(task: () => Promise<T>): Promise<T> {
+export function serial<T>(task: () => Promise<T>): Promise<T> {
   const run = queue.then(task);
   queue = run.catch(() => {});
   return run;
@@ -70,10 +71,17 @@ export function loadProject(snapshot: ProjectSnapshot) {
   rememberProject(snapshot.dir, snapshot.meta.title);
   setWindowTitle(`${snapshot.meta.title || baseName(snapshot.dir)} — PaperForge`);
   scheduleCompile("full", 0);
+  historyOpened();
+}
+
+/** Saves pending edits and records the session as a version before the project goes away. */
+export async function leaveProject() {
+  await flushSaves();
+  await versionOnLeave();
 }
 
 export async function closeProject() {
-  await flushSaves();
+  await leaveProject();
   store.set({ ...initialProjectState });
   setWindowTitle("PaperForge");
 }
@@ -132,6 +140,7 @@ async function writePending() {
     saveState: errors.length ? "error" : hasPending() ? "pending" : "saved",
     saveError: errors[0] ?? null,
   });
+  if (errors.length === 0) noteSaved();
 }
 
 export function flushSaves(): Promise<void> {
@@ -209,7 +218,7 @@ function applySnapshot(snapshot: ProjectSnapshot, preferredFile?: EditorFile) {
   });
 }
 
-async function restructure(
+export async function restructure(
   command: (dir: string) => Promise<ProjectSnapshot>,
   preferredFile?: (snapshot: ProjectSnapshot) => EditorFile | undefined,
 ) {
@@ -223,6 +232,7 @@ async function restructure(
   });
   if (!snapshot || snapshot.dir !== store.get().dir) return;
   applySnapshot(snapshot, preferredFile?.(snapshot));
+  structureChanged();
   if (hasPending()) queueSave();
   else scheduleCompile("preview", 0);
 }
