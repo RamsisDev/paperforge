@@ -144,6 +144,31 @@ Each registers through the 3A widget registry only. Gate includes typingCost on 
 - Update `01-word-like-editing.md` markers from **[S]** to **[V]** where implementation confirmed
   them, then open one PR per batch (or one PR for the branch) against `main`.
 
+## Status (2026-10-28)
+
+All batches are merged on `feat/word-like`. Final gate: build, 239 vitest + 117 Rust unit tests,
+19 toolchain tests offline (`warm-tex-cache` run), `ui-check` and `web-check` with no page errors.
+Typing p50: Source 0.20 / 0.30 ms (one part / 20x), Writing 0.20 / 0.40 ms, identical with track
+changes on; no long tasks. Writing mode on long parts sits at the 0.40 ms gate.
+
+Decisions taken: `dictionary-es` under MPL, `dictionary-en` is MIT AND BSD (`THIRD_PARTY.md`);
+localized reference prefix instead of `cleveref`; comments as inline spans with a `text`
+attribute; track changes without "compare with version X".
+
+Follow-ups:
+- "Compare with version X" for track changes, once `02-git-versioning.md` lands.
+- Track edits inside footnotes, captions and across lines (they pass through untracked today).
+- Merged table cells (rewrite `Table()` in `paper.lua`).
+- `header-includes` sits before natbib/hyperref, so a preamble cannot load `cleveref`-style
+  packages that must follow hyperref.
+- Non-breaking space between the reference prefix and `@ref`; cache label numbers to disk so they
+  show before the first compile.
+- Margin notes in the review PDF need ~3.2 cm of margin; with 2.5 cm they print inline.
+- Harper's heading title-case rule is noisy for sentence-case papers.
+- Writing mode typing cost on long parts is at the gate; profile before adding more widgets.
+- The e2e run can fail once right after new dependencies are added (Vite reloads while it
+  optimizes them); a rerun passes.
+
 ## Summary
 
 | Batch | Parallel tasks | Features | Depends on |
