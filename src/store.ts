@@ -10,6 +10,8 @@ export const PREAMBLE_FILE = "preamble.tex";
 export type EditorFile = string;
 export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find";
 export type Theme = "light" | "dark";
+/** "writing" renders the Markdown in place; "source" shows it as typed. */
+export type EditorMode = "writing" | "source";
 export type GalleryMode = "create" | "change";
 
 export function isPartFile(file: EditorFile): boolean {
@@ -61,6 +63,7 @@ interface State {
   pdf: { data: Uint8Array; version: number } | null;
 
   theme: Theme;
+  editorMode: EditorMode;
   sidebarTab: SidebarTab;
   sidebarOpen: boolean;
   problemsOpen: boolean;
@@ -80,6 +83,8 @@ interface State {
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
   (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
+const storedEditorMode: EditorMode = localStorage.getItem("paperforge.editorMode") === "writing" ? "writing" : "source";
 
 export const initialProjectState = {
   dir: null,
@@ -106,6 +111,7 @@ export const initialProjectState = {
 export const useStore = create<State>(() => ({
   ...initialProjectState,
   theme: storedTheme,
+  editorMode: storedEditorMode,
   sidebarTab: "paper",
   sidebarOpen: true,
   problemsOpen: false,
@@ -188,4 +194,9 @@ export function askNewPart(index: number) {
 export function setTheme(theme: Theme) {
   localStorage.setItem("paperforge.theme", theme);
   store.set({ theme });
+}
+
+export function setEditorMode(editorMode: EditorMode) {
+  localStorage.setItem("paperforge.editorMode", editorMode);
+  store.set({ editorMode });
 }
