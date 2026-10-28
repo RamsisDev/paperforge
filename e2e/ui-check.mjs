@@ -876,14 +876,6 @@ await shot("23f-equation-editor-source-mode");
 await page.keyboard.press("Escape");
 console.log("source mode: escape leaves the document unchanged:", (await editorDoc()) === docAfter);
 
-await page.locator(".cm-line", { hasText: "Inline math works" }).getByText("ge 0").click();
-await page.keyboard.press("ControlOrMeta+Alt+m");
-await mathDialog.locator("math-field").waitFor({ timeout: 5000 });
-console.log("source mode: Mod-Alt-m opens the equation editor on", JSON.stringify(await mathDialog.getByRole("textbox", { name: "LaTeX", exact: true }).inputValue()));
-await shot("23f-equation-editor-source-mode");
-await page.keyboard.press("Escape");
-console.log("source mode: escape leaves the document unchanged:", (await editorDoc()) === docAfter);
-
 // Show LaTeX: Mod-Alt-L opens the cursor block's generated LaTeX; converting it to a raw LaTeX
 // block is one edit that Mod-Z undoes. In Writing mode the "TeX" handle opens the same popover.
 const editorText = () =>
