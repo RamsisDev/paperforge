@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use paperforge_lib::backend::Backend;
 use paperforge_lib::compiler::{self, CompileMode, CompileOutcome, Severity, TEMPLATES, Toolchain};
 use paperforge_lib::project;
 
@@ -368,6 +369,7 @@ async fn latex_errors_point_at_the_fragment_line() {
         assert_eq!(error.file.as_deref(), Some("part-sections-introduction.tex"), "{error:?}");
         assert_eq!(error.part.as_deref(), Some(INTRO), "{error:?}");
         assert!(error.source.as_deref().unwrap().contains("\\undefinedmacro"), "{error:?}");
+        assert_eq!(error.part_line, Some(3), "{error:?}");
 
         project::save_part(tmp.path(), INTRO, "# Intro\n\nFixed, see @fig:nope.\n").unwrap();
         let fixed = compile(tmp.path(), CompileMode::Preview, None).await;
@@ -376,5 +378,31 @@ async fn latex_errors_point_at_the_fragment_line() {
         assert_eq!(warning.file.as_deref(), Some("part-sections-introduction.tex"), "{warning:?}");
         assert_eq!(warning.part.as_deref(), Some(INTRO), "{warning:?}");
         assert!(warning.source.as_deref().unwrap().contains("\\ref{fig:nope}"), "{warning:?}");
+        assert_eq!(warning.part_line, Some(3), "{warning:?}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn synctex_links_markdown_lines_and_pdf_spots_both_ways() {
+    for template in ["article", "report"] {
+        let tmp = sample_project(template, "");
+        let outcome = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        let backend = Backend::new(toolchain(), None, manifest().join("resources/sample"));
+        let dir = tmp.path().to_str().unwrap();
+        for (part, text) in [(INTRO, "Cite with"), (METHOD, "Inline math works"), (METHOD, "Raw LaTeX passes")] {
+            let markdown = std::fs::read_to_string(tmp.path().join(part)).unwrap();
+            let line = markdown.lines().position(|l| l.contains(text)).unwrap() + 1;
+            let spot = backend.synctex_to_pdf(dir, part, line).await.unwrap();
+            let spot = spot.unwrap_or_else(|| panic!("{template}: no PDF spot for {part}:{line}"));
+            assert!(spot.page >= 1 && spot.height > 0.0, "{template}: {spot:?}");
+            let back = backend.synctex_to_source(dir, spot.page, spot.x + 2.0, spot.y + spot.height / 2.0).await;
+            let back = back.unwrap().unwrap_or_else(|| panic!("{template}: no source at {spot:?}"));
+            assert_eq!((back.part.as_str(), back.line), (part, line), "{template}: {text} at {spot:?}");
+        }
+        // The title block comes from the metadata, not from a part.
+        let title = backend.synctex_to_source(dir, 1, 300.0, 5.0).await.unwrap();
+        assert_eq!(title, None, "{template}");
     }
 }

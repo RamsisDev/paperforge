@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -11,6 +12,7 @@ use tokio::task::AbortHandle;
 
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
 use crate::project::{self, PaperMeta};
+use crate::synctex::{self, PdfBox, SourceSpot, SyncTex};
 
 pub struct Backend {
     pub toolchain: Toolchain,
@@ -23,6 +25,8 @@ pub struct Backend {
     /// One compile at a time: a new request aborts the running one.
     running: Mutex<Option<AbortHandle>>,
     build_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The last SyncTeX file read, kept until the next compile rewrites it.
+    synctex: Mutex<Option<(PathBuf, SystemTime, Arc<SyncTex>)>>,
 }
 
 #[derive(serde::Serialize)]
@@ -81,6 +85,7 @@ impl Backend {
             cache_ready: OnceCell::new(),
             running: Mutex::new(None),
             build_lock: Arc::new(tokio::sync::Mutex::new(())),
+            synctex: Mutex::new(None),
         }
     }
 
@@ -129,6 +134,44 @@ impl Backend {
             Ok(outcome) => outcome,
             Err(e) if e.is_cancelled() => Ok(CompileOutcome::cancelled()),
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The SyncTeX data of the project's last compile, `None` before the first one.
+    async fn synctex(&self, dir: &Path) -> Result<Option<Arc<SyncTex>>, String> {
+        let path = project::build_dir(dir).join(synctex::SYNCTEX_FILE);
+        let Ok(modified) = tokio::fs::metadata(&path).await.and_then(|m| m.modified()) else {
+            return Ok(None);
+        };
+        if let Some((cached, at, sync)) = &*self.synctex.lock().unwrap()
+            && *cached == path
+            && *at == modified
+        {
+            return Ok(Some(sync.clone()));
+        }
+        let read = path.clone();
+        let sync = Arc::new(
+            tokio::task::spawn_blocking(move || SyncTex::read(&read)).await.map_err(|e| e.to_string())??,
+        );
+        *self.synctex.lock().unwrap() = Some((path, modified, sync.clone()));
+        Ok(Some(sync))
+    }
+
+    /// The Markdown line typeset at a spot of a PDF page (1-based, PDF points from the top left).
+    pub async fn synctex_to_source(&self, dir: &str, page: u32, x: f64, y: f64) -> Result<Option<SourceSpot>, String> {
+        let dir = Path::new(dir);
+        match self.synctex(dir).await? {
+            Some(sync) => synctex::source_at(&sync, dir, page, x, y).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Where a Markdown line (1-based) of a part was typeset.
+    pub async fn synctex_to_pdf(&self, dir: &str, part: &str, line: usize) -> Result<Option<PdfBox>, String> {
+        let dir = Path::new(dir);
+        match self.synctex(dir).await? {
+            Some(sync) => synctex::pdf_at(&sync, dir, part, line).await,
+            None => Ok(None),
         }
     }
 
@@ -212,6 +255,19 @@ impl Backend {
             dir: String,
             dest: String,
         }
+        #[derive(Deserialize)]
+        struct PdfSpot {
+            dir: String,
+            page: u32,
+            x: f64,
+            y: f64,
+        }
+        #[derive(Deserialize)]
+        struct PartLine {
+            dir: String,
+            part: String,
+            line: usize,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -280,13 +336,21 @@ impl Backend {
                     .map_err(|e| e.to_string())??;
                 json(())
             }
+            "synctex_to_source" => {
+                let a: PdfSpot = parse(args)?;
+                json(self.synctex_to_source(&a.dir, a.page, a.x, a.y).await?)
+            }
+            "synctex_to_pdf" => {
+                let a: PartLine = parse(args)?;
+                json(self.synctex_to_pdf(&a.dir, &a.part, a.line).await?)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 18] = [
+pub const COMMANDS: [&str; 20] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -305,6 +369,8 @@ pub const COMMANDS: [&str; 18] = [
     "compile",
     "export_pdf",
     "export_zip",
+    "synctex_to_source",
+    "synctex_to_pdf",
 ];
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
 pub mod backend;
 pub mod compiler;
+pub mod markers;
 pub mod project;
+pub mod synctex;
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +12,7 @@ use tauri::{AppHandle, Manager, State};
 use backend::{Backend, EngineInfo};
 use compiler::{CompileMode, CompileOutcome, Toolchain};
 use project::{PaperMeta, ProjectSnapshot};
+use synctex::{PdfBox, SourceSpot};
 
 fn sidecar(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
@@ -123,6 +126,22 @@ async fn export_zip(dir: String, dest: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn synctex_to_source(
+    state: State<'_, Backend>,
+    dir: String,
+    page: u32,
+    x: f64,
+    y: f64,
+) -> Result<Option<SourceSpot>, String> {
+    state.synctex_to_source(&dir, page, x, y).await
+}
+
+#[tauri::command]
+async fn synctex_to_pdf(state: State<'_, Backend>, dir: String, part: String, line: usize) -> Result<Option<PdfBox>, String> {
+    state.synctex_to_pdf(&dir, &part, line).await
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -171,6 +190,8 @@ pub fn run() {
             compile,
             export_pdf,
             export_zip,
+            synctex_to_source,
+            synctex_to_pdf,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

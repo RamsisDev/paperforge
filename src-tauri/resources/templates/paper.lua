@@ -4,6 +4,7 @@
 --   $$ ... $$ {#eq:x}         -> numbered equation with \label
 --   {.wide} on a figure/table -> spans both columns (figure* / table*)
 --   tables                    -> table float + tabular (longtable breaks two-column classes)
+--   <!--pf:N--> block markers -> %PF:N comment lines (Markdown line N starts the next block)
 
 local REF_PREFIXES = { fig = true, tbl = true, eq = true, sec = true }
 
@@ -221,7 +222,17 @@ local function Table(tbl)
   return pandoc.RawBlock("latex", table.concat(lines, "\n"))
 end
 
+local function RawBlock(el)
+  if el.format ~= "html" then
+    return nil
+  end
+  local line = el.text:match("^<!%-%-pf:(%d+)%-%->$")
+  if line then
+    return pandoc.RawBlock("latex", "%PF:" .. line)
+  end
+end
+
 return {
   { Meta = read_meta, Pandoc = scope_headings_to_file },
-  { Cite = Cite, Para = Para, Figure = Figure, Table = Table },
+  { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock },
 }
