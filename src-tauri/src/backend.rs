@@ -212,6 +212,11 @@ impl Backend {
             dir: String,
             dest: String,
         }
+        #[derive(Deserialize)]
+        struct DictionaryAdd {
+            dir: String,
+            words: Vec<String>,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -280,13 +285,18 @@ impl Backend {
                     .map_err(|e| e.to_string())??;
                 json(())
             }
+            "dictionary_read" => json(project::read_dictionary(Path::new(&parse::<Dir>(args)?.dir))?),
+            "dictionary_add" => {
+                let a: DictionaryAdd = parse(args)?;
+                json(project::add_to_dictionary(Path::new(&a.dir), &a.words)?)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 18] = [
+pub const COMMANDS: [&str; 20] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -305,6 +315,8 @@ pub const COMMANDS: [&str; 18] = [
     "compile",
     "export_pdf",
     "export_zip",
+    "dictionary_read",
+    "dictionary_add",
 ];
 
 #[cfg(test)]

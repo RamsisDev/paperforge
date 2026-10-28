@@ -113,6 +113,9 @@ export const api = {
   exportZip: (dir: string, dest: string) => invoke<void>("export_zip", { dir, dest }),
   /** Browser only: folders for the in-page folder picker. */
   browse: (path: string | null) => invoke<FolderListing>("_browse", { path }),
+  readDictionary: (dir: string) => invoke<string[]>("dictionary_read", { dir }),
+  /** Appends new words to the project dictionary; returns the whole list. */
+  addToDictionary: (dir: string, words: string[]) => invoke<string[]>("dictionary_add", { dir, words }),
 };
 
 export interface FolderListing {
