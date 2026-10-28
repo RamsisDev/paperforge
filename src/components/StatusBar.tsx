@@ -1,5 +1,6 @@
-import { CircleAlert, CircleCheck, Cloud, LoaderCircle, SpellCheck, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, Cloud, LoaderCircle, SpellCheck, SpellCheck2, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent } from "react";
+import { dialectFor, grammarEnabled, onGrammarSettings, setGrammarCheck } from "@/editor/grammar";
 import { dictionaryFor, onSpellSettings, setSpellCheck, spellCheckEnabled } from "@/editor/spell";
 import type { Part, TemplateId } from "@/lib/api";
 import { partInfo, totalWords } from "@/lib/parts";
@@ -28,6 +29,23 @@ function SpellToggle({ language, label }: { language: string; label: string }) {
       onClick={() => setSpellCheck(!enabled)}
     >
       <SpellCheck size={12} className={enabled ? "" : "opacity-50"} />
+    </button>
+  );
+}
+
+/** Grammar is checked in English only; for other languages the toggle is not shown. */
+function GrammarToggle({ language }: { language: string }) {
+  const enabled = useSyncExternalStore(onGrammarSettings, grammarEnabled);
+  if (!dialectFor(language)) return null;
+  return (
+    <button
+      className={`flex items-center rounded px-1 hover:bg-raised hover:text-fg cursor-default ${enabled ? "" : "text-faint"}`}
+      title={enabled ? "Checking grammar. Click to turn it off" : "Grammar check is off. Click to turn it on"}
+      aria-label="Grammar check"
+      aria-pressed={enabled}
+      onClick={() => setGrammarCheck(!enabled)}
+    >
+      <SpellCheck2 size={12} className={enabled ? "" : "opacity-50"} />
     </button>
   );
 }
@@ -237,6 +255,7 @@ export function StatusBar() {
           label={LANGUAGES.find((l) => l.id === meta.language)?.label ?? meta.language}
         />
       )}
+      {meta && <GrammarToggle language={meta.language} />}
     </footer>
   );
 }

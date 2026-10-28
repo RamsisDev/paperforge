@@ -637,6 +637,43 @@ console.log(
   JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "dictionary_add").map((c) => c.args.words))),
 );
 
+// Grammar check (English, Harper in a worker): a grammar mark offers suggestions and one fixes the
+// line; a misspelled word keeps only its spelling mark.
+const grammarMark = () => page.locator(".pf-grammar").filter({ hasText: /^an$/ }).first();
+const lintMarks = () =>
+  page.evaluate(() =>
+    [...document.querySelectorAll(".cm-lintRange")].map((el) => `${el.classList.contains("pf-grammar") ? "grammar" : el.classList.contains("pf-spell") ? "spell" : "other"}:${el.textContent}`),
+  );
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\n\nThis is an test of teh grammar checker. ");
+const grammarStart = Date.now();
+await grammarMark().waitFor({ timeout: 30000 });
+await page.locator(".pf-spell").filter({ hasText: /^teh$/ }).first().waitFor({ timeout: 10000 });
+await settle(1500);
+const marks = await lintMarks();
+const tehMarks = marks.filter((m) => m.endsWith(":teh"));
+console.log(
+  `grammar: first mark after ${Date.now() - grammarStart} ms · marks ${JSON.stringify(marks)} · "teh" ${
+    JSON.stringify(tehMarks) === JSON.stringify(["spell:teh"]) ? "spelling only, no duplicate" : `DUPLICATED ${JSON.stringify(tehMarks)}`
+  }`,
+);
+await grammarMark().hover();
+const grammarTip = page.locator(".cm-tooltip-lint .cm-diagnostic").filter({ has: page.locator(".cm-diagnosticAction", { hasText: "Ignore" }) }).first();
+await grammarTip.waitFor({ timeout: 5000 });
+await shot("22a-grammar-suggestions");
+const grammarActions = await grammarTip.locator(".cm-diagnosticAction").allTextContents();
+console.log("grammar message:", JSON.stringify(await grammarTip.locator(".cm-diagnosticText").textContent()), "· actions:", JSON.stringify(grammarActions));
+await grammarTip.locator(".cm-diagnosticAction").first().click();
+await settle(300);
+console.log(
+  "after the grammar suggestion:",
+  JSON.stringify(await page.locator(".cm-line").filter({ hasText: "grammar checker" }).first().textContent()),
+);
+await page.locator(".pf-grammar").filter({ hasText: /^an$/ }).waitFor({ state: "detached", timeout: 5000 });
+const grammarToggle = page.locator("footer").getByRole("button", { name: "Grammar check" });
+console.log("grammar toggle pressed:", await grammarToggle.getAttribute("aria-pressed"), "·", await grammarToggle.getAttribute("title"));
+
 // Word goals, set from the status bar counter.
 const wordCounter = page.locator("footer").getByRole("button", { name: "Word count" });
 await wordCounter.click();
