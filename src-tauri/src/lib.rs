@@ -1,15 +1,19 @@
 pub mod backend;
+pub mod bibfetch;
 pub mod compiler;
 pub mod markers;
 pub mod project;
 pub mod synctex;
+pub mod zotero;
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use tauri::ipc::Response;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use backend::{Backend, EngineInfo};
+use bibfetch::Lookup;
 use compiler::{CompileMode, CompileOutcome, Toolchain};
 use project::{PaperMeta, ProjectSnapshot};
 use synctex::{PdfBox, SourceSpot};
@@ -172,6 +176,43 @@ async fn template_restore(dir: String) -> Result<ProjectSnapshot, String> {
     project::restore_template(Path::new(&dir))
 }
 
+#[tauri::command]
+async fn bib_lookup(query: String, existing_keys: Vec<String>) -> Result<Lookup, String> {
+    bibfetch::lookup(&query, &existing_keys).await
+}
+
+#[tauri::command]
+async fn zotero_linked(dir: String) -> Result<Option<String>, String> {
+    zotero::linked(Path::new(&dir))
+}
+
+#[tauri::command]
+async fn zotero_link(dir: String, path: Option<String>) -> Result<Option<String>, String> {
+    zotero::link(Path::new(&dir), path.as_deref())
+}
+
+#[tauri::command]
+async fn zotero_read(dir: String) -> Result<Option<String>, String> {
+    zotero::read_linked(Path::new(&dir))
+}
+
+/// The watcher of the open project's linked bibliography; replaced when another project opens.
+#[derive(Default)]
+struct ZoteroWatch(Mutex<Option<notify::RecommendedWatcher>>);
+
+/// Watches the project's linked bibliography; false when it has none.
+#[tauri::command]
+async fn zotero_watch(app: AppHandle, watch: State<'_, ZoteroWatch>, dir: String) -> Result<bool, String> {
+    let mut current = watch.0.lock().unwrap();
+    *current = None;
+    let Some(bib) = zotero::linked(Path::new(&dir))? else { return Ok(false) };
+    let watcher = zotero::watch(Path::new(&bib), move || {
+        let _ = app.emit(zotero::CHANGED_EVENT, &dir);
+    })?;
+    *current = Some(watcher);
+    Ok(true)
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -194,6 +235,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(build_backend(app.handle())?);
+            app.manage(ZoteroWatch::default());
             // Seed the TeX cache while the user is still picking a project.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -228,6 +270,11 @@ pub fn run() {
             preamble_save,
             template_eject,
             template_restore,
+            bib_lookup,
+            zotero_linked,
+            zotero_link,
+            zotero_read,
+            zotero_watch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

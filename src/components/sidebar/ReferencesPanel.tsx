@@ -1,11 +1,13 @@
-import { FileText, Plus, Search, Upload } from "lucide-react";
-import { useDeferredValue, useMemo, useState } from "react";
+import { FileText, Globe, LoaderCircle, Plus, RefreshCw, Search, Unlink, Upload } from "lucide-react";
+import { useDeferredValue, useEffect, useMemo, useState, type FormEvent } from "react";
 import { insertInline } from "@/editor/commands";
 import { withEditor } from "@/editor/bridge";
-import { pickFiles, readPickedText } from "@/lib/platform";
-import { parseBib, shortAuthors } from "@/lib/bib";
+import { api, baseName, type BibLookup } from "@/lib/api";
+import { isDesktop, pickFiles, readPickedText } from "@/lib/platform";
+import { appendToBib, parseBib, shortAuthors } from "@/lib/bib";
 import { setBib } from "@/session";
 import { jumpTo, store, useStore } from "@/store";
+import { describeSync, syncZotero, watchZotero } from "@/zotero";
 import { notify } from "../Toaster";
 import { Button, Input } from "../ui";
 
@@ -21,10 +23,189 @@ const NEW_ENTRY = `@article{key2026,
 `;
 
 function appendBib(text: string) {
-  const bib = store.get().bib;
-  const sep = bib.trim() === "" ? "" : bib.endsWith("\n\n") ? "" : bib.endsWith("\n") ? "\n" : "\n\n";
-  setBib(bib + sep + text);
-  return (bib + sep).split("\n").length - 1;
+  const next = appendToBib(store.get().bib, text);
+  setBib(next.bib);
+  return next.line;
+}
+
+const knownKeys = () => parseBib(store.get().bib).map((e) => e.key);
+
+/** Looks a DOI or arXiv id up, previews the entry, then appends it to refs.bib. */
+function AddById() {
+  const [query, setQuery] = useState("");
+  const [looking, setLooking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<BibLookup | null>(null);
+
+  async function lookUp(e: FormEvent) {
+    e.preventDefault();
+    const q = query.trim();
+    if (!q || looking) return;
+    setLooking(true);
+    setError(null);
+    setPreview(null);
+    try {
+      setPreview(await api.bibLookup(q, knownKeys()));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLooking(false);
+    }
+  }
+
+  function add(entry: BibLookup, cite: boolean) {
+    if (knownKeys().some((k) => k.toLowerCase() === entry.key.toLowerCase())) {
+      setError(`refs.bib already has @${entry.key}; look it up again for a fresh key.`);
+      return;
+    }
+    appendBib(entry.bibtex);
+    if (cite) withEditor((v) => insertInline(v, `[@${entry.key}]`));
+    notify(`Added @${entry.key}`);
+    setPreview(null);
+    setQuery("");
+  }
+
+  return (
+    <div className="space-y-2">
+      <form className="flex gap-1.5" onSubmit={(e) => void lookUp(e)}>
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Add by DOI or arXiv id"
+          aria-label="DOI or arXiv id"
+          spellCheck={false}
+        />
+        <Button size="sm" type="submit" disabled={looking || !query.trim()} className="shrink-0">
+          {looking ? <LoaderCircle size={13} className="animate-spin" /> : <Globe size={13} />} Look up
+        </Button>
+      </form>
+      {error && (
+        <p role="alert" className="text-[11px] leading-snug text-danger">
+          {error}
+        </p>
+      )}
+      {preview && (
+        <div role="group" aria-label="Reference preview" className="rounded-md border border-line bg-raised p-2">
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[10.5px] leading-snug text-fg">
+            {preview.bibtex}
+          </pre>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <Button size="sm" variant="primary" onClick={() => add(preview, false)}>
+              Add to refs.bib
+            </Button>
+            <Button size="sm" onClick={() => add(preview, true)} title={`Also insert [@${preview.key}] at the cursor`}>
+              Add and cite
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setPreview(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The link to an external .bib (a Better BibTeX auto-export) merged into refs.bib. */
+function ZoteroLink() {
+  const dir = useStore((s) => s.dir);
+  const [linked, setLinked] = useState<string | null>(null);
+  const [typedPath, setTypedPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!dir) return;
+    let live = true;
+    api.zoteroLinked(dir).then(
+      (path) => live && setLinked(path),
+      () => live && setLinked(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [dir]);
+
+  async function sync() {
+    try {
+      const result = await syncZotero();
+      notify(result ? describeSync(result) : "No Zotero export is linked");
+    } catch (e) {
+      notify(`Zotero sync failed: ${String(e)}`, "error");
+    }
+  }
+
+  async function linkTo(path: string | null) {
+    if (!dir) return;
+    try {
+      const next = await api.zoteroLink(dir, path);
+      setLinked(next);
+      setTypedPath(null);
+      await watchZotero(dir);
+      if (next) await sync();
+    } catch (e) {
+      notify(String(e), "error");
+    }
+  }
+
+  async function pick() {
+    // A browser file picker gives the contents but not the path the link needs.
+    if (!isDesktop) return setTypedPath("");
+    const [file] = await pickFiles("BibTeX", ["bib"]);
+    if (file?.path) await linkTo(file.path);
+  }
+
+  if (linked) {
+    return (
+      <div className="flex items-center gap-1 border-t border-line px-3 py-1.5 text-[11px]">
+        <span className="min-w-0 flex-1 truncate text-muted" title={linked}>
+          Zotero: {baseName(linked)}
+        </span>
+        <Button size="sm" variant="ghost" onClick={() => void sync()} title="Merge the export into refs.bib now">
+          <RefreshCw size={12} /> Sync now
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => void linkTo(null)} aria-label="Unlink Zotero export" title="Unlink">
+          <Unlink size={12} />
+        </Button>
+      </div>
+    );
+  }
+  if (typedPath !== null) {
+    return (
+      <form
+        className="flex gap-1.5 border-t border-line px-3 py-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void linkTo(typedPath);
+        }}
+      >
+        <Input
+          autoFocus
+          value={typedPath}
+          onChange={(e) => setTypedPath(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setTypedPath(null)}
+          placeholder="/path/to/My Library.bib"
+          aria-label="Path of the exported .bib"
+        />
+        <Button size="sm" type="submit" disabled={!typedPath.trim()} className="shrink-0">
+          Link
+        </Button>
+      </form>
+    );
+  }
+  return (
+    <div className="border-t border-line px-3 py-1.5">
+      <button
+        className="text-[11px] text-faint hover:text-accent cursor-default"
+        onClick={() => void pick()}
+        title={
+          isDesktop
+            ? "Merge a Better BibTeX auto-export into refs.bib whenever Zotero rewrites it"
+            : "Merge a Better BibTeX auto-export into refs.bib with Sync now"
+        }
+      >
+        Link a Zotero export…
+      </button>
+    </div>
+  );
 }
 
 export function ReferencesPanel() {
@@ -39,7 +220,7 @@ export function ReferencesPanel() {
   async function importBib() {
     const picked = await pickFiles("BibTeX", ["bib"]);
     if (picked.length === 0) return;
-    const known = new Set(parseBib(store.get().bib).map((e) => e.key));
+    const known = new Set(knownKeys());
     let added = 0;
     for (const file of picked) {
       const text = await readPickedText(file);
@@ -70,6 +251,7 @@ export function ReferencesPanel() {
             <FileText size={13} /> Edit
           </Button>
         </div>
+        <AddById />
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-1.5">
         {shown.length === 0 && (
@@ -100,6 +282,7 @@ export function ReferencesPanel() {
           </div>
         ))}
       </div>
+      <ZoteroLink />
       <p className="border-t border-line px-3 py-2 text-[11px] text-faint">Type @ in the editor to cite by key.</p>
     </div>
   );

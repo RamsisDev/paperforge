@@ -195,6 +195,15 @@ function stubTauri(fixture) {
         case "template_restore":
           state.meta = { ...state.meta, templateFile: "" };
           return snapshot();
+        case "bib_lookup":
+          if (!args.query.includes("10.")) throw `'${args.query}' is not a DOI (10.1234/…) or an arXiv id (2401.01234, hep-th/9901001).`;
+          return {
+            key: "vaswani2017attention",
+            bibtex:
+              "@article{vaswani2017attention,\n  title   = {Attention Is All You Need},\n" +
+              "  journal = {Advances in Neural Information Processing Systems},\n" +
+              "  author  = {Vaswani, Ashish and Shazeer, Noam},\n  year    = {2017}\n}\n",
+          };
         default:
           return null;
       }
@@ -427,6 +436,24 @@ await page.keyboard.press("Escape");
 await page.getByRole("tab", { name: "Refs", exact: true }).click();
 await settle(200);
 await shot("15-references");
+
+// Add by DOI: a bad query explains itself, a good one is previewed, then appended to refs.bib.
+const doiInput = page.getByLabel("DOI or arXiv id");
+await doiInput.fill("not an id");
+await page.getByRole("button", { name: "Look up" }).click();
+console.log("bad DOI lookup:", await page.getByRole("alert").textContent({ timeout: 5000 }));
+await doiInput.fill("https://doi.org/10.5555/3295222.3295349");
+await page.getByRole("button", { name: "Look up" }).click();
+await page.getByRole("group", { name: "Reference preview" }).waitFor({ timeout: 5000 });
+await shot("15b-reference-preview");
+await page.getByRole("button", { name: "Add to refs.bib" }).click();
+await page.getByText("@vaswani2017attention", { exact: true }).waitFor({ timeout: 5000 });
+await settle(1500);
+const savedBib = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "project_save" && c.args.bib).at(-1)?.args.bib);
+console.log(
+  "add by DOI: entry listed,",
+  savedBib?.startsWith(fixture.bib) && savedBib.endsWith("year    = {2017}\n}\n") ? "refs.bib appended ok" : "refs.bib NOT appended",
+);
 await page.getByRole("tab", { name: "Figures", exact: true }).click();
 await settle(500);
 
