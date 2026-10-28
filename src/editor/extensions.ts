@@ -47,6 +47,7 @@ import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
 import { markdownFolding } from "./folding";
 import { editorModeExtension } from "./livepreview";
+import { styleSlashCommands } from "./styles";
 
 const highlight = HighlightStyle.define([
   { tag: t.heading1, fontWeight: "700", fontSize: "1.25em", color: "var(--pf-syn-heading)" },
@@ -164,6 +165,7 @@ function slashCompletions(context: CompletionContext): CompletionResult | null {
     options: [
       ...SLASH_COMMANDS.map((c) => snippetCompletion(c.template, { label: c.label, detail: c.detail, type: "keyword" })),
       refSlashCommand,
+      ...styleSlashCommands(),
     ],
     validFor: (text) => /^\/[\w-]*$/.test(text) && !text.startsWith("/ref"),
   };

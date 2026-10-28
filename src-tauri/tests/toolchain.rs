@@ -492,6 +492,38 @@ async fn journal_templates_ignore_the_page_setup() {
 
 #[tokio::test]
 #[ignore = "runs the TeX toolchain"]
+async fn paragraph_and_character_styles_compile() {
+    let builtin: Vec<paperforge_lib::styles::Style> =
+        serde_json::from_str(include_str!("../../src/lib/builtinStyles.json")).unwrap();
+    for template in ["article", "ieee"] {
+        let tmp = sample_project(template, "");
+        edit_part(tmp.path(), INTRO, |c| {
+            let mut c = c.replace("information can be measured", "[information]{.smallcaps} can be [measured]{.highlight}");
+            for style in builtin.iter().filter(|s| s.kind == paperforge_lib::styles::StyleKind::Paragraph) {
+                c.push_str(&format!("\n::: {{.{}}}\nA *styled* paragraph with [a keyword]{{.keyword}}.\n\nAnd a second one.\n:::\n", style.name));
+            }
+            c
+        });
+        update_meta(tmp.path(), |m| m.styles = builtin.clone());
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(!outcome.used_network, "{template}: the built-in styles only use cached packages");
+        let fragment = std::fs::read_to_string(project::build_dir(tmp.path()).join("part-sections-introduction.tex")).unwrap();
+        for expected in ["\\begin{pf-note}", "\\end{pf-pull-quote}", "\\pfstylesmallcaps{information}", "\\pfstylehighlight{measured}", "\\pfstylekeyword{a keyword}"] {
+            assert!(fragment.contains(expected), "{template}: {expected} in\n{fragment}");
+        }
+        let tex = main_tex(tmp.path());
+        assert!(tex.contains("\\newenvironment{pf-note}") && tex.contains("\\newcommand{\\pfstylesmallcaps}[1]{\\textsc{#1}}"));
+
+        update_meta(tmp.path(), |m| m.styles.retain(|s| s.name != "note"));
+        let missing = compile(tmp.path(), CompileMode::Preview, None).await;
+        assert!(missing.ok, "{template}: an unknown class is a plain div: {:#?}", errors(&missing));
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
 async fn ejected_template_compiles_and_restores() {
     let tc = toolchain();
     for template in ["article", "report"] {

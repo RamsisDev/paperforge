@@ -1,0 +1,44 @@
+[
+  {
+    "name": "note",
+    "kind": "paragraph",
+    "label": "Note box",
+    "latex": "\\par\\medskip\\noindent\\textcolor{gray}{\\rule{\\linewidth}{0.6pt}}\\par\\nobreak\\noindent\\textbf{Note}\\par\\nobreak\n#1\n\\par\\nobreak\\noindent\\textcolor{gray}{\\rule{\\linewidth}{0.6pt}}\\par\\medskip"
+  },
+  {
+    "name": "callout",
+    "kind": "paragraph",
+    "label": "Callout",
+    "latex": "\\begin{quote}\\color{blue!55!black}\n#1\n\\end{quote}"
+  },
+  {
+    "name": "centered",
+    "kind": "paragraph",
+    "label": "Centered paragraph",
+    "latex": "\\begin{center}\n#1\n\\end{center}"
+  },
+  {
+    "name": "pull-quote",
+    "kind": "paragraph",
+    "label": "Pull quote",
+    "latex": "\\begin{quote}\\itshape\\large\n#1\n\\end{quote}"
+  },
+  {
+    "name": "smallcaps",
+    "kind": "character",
+    "label": "Small caps",
+    "latex": "\\textsc{#1}"
+  },
+  {
+    "name": "highlight",
+    "kind": "character",
+    "label": "Highlight",
+    "latex": "\\hl{#1}"
+  },
+  {
+    "name": "keyword",
+    "kind": "character",
+    "label": "Keyword",
+    "latex": "\\textcolor{blue!55!black}{\\textbf{#1}}"
+  }
+]

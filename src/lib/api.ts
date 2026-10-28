@@ -30,6 +30,8 @@ export interface PaperMeta {
   templateFile: string;
   /** Page setup of the generic templates; paper size, font size and columns are `classOptions`. */
   layout: Layout;
+  /** Div and span classes typeset with their LaTeX; absent until the project has one. */
+  styles?: Style[];
 }
 
 export type MarginUnit = "cm" | "mm" | "in";
@@ -59,6 +61,16 @@ export interface Layout {
   header: Slots;
   footer: Slots;
   lineNumbers: boolean;
+}
+
+export type StyleKind = "paragraph" | "character";
+
+export interface Style {
+  /** The div (`::: {.name}`) or span (`[text]{.name}`) class. */
+  name: string;
+  kind: StyleKind;
+  /** LaTeX around `#1`, which stands for the styled text. */
+  latex: string;
 }
 
 export interface Part {

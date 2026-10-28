@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod layout;
 pub mod markers;
 pub mod project;
+pub mod styles;
 pub mod synctex;
 pub mod zotero;
 

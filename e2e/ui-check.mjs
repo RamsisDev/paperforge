@@ -662,6 +662,28 @@ await page.getByRole("tab", { name: "Paper", exact: true }).click();
 console.log("IEEE page setup:", await page.getByRole("region", { name: "Page setup" }).locator("p").textContent());
 await pickTemplate("IEEE Conference", "Thesis \\/ Report");
 
+// Styles: a character style applied to the editor's selection from the Paper panel adds the
+// built-in to the project; applying it again removes it.
+await editorTabs().first().click();
+await settle(300);
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\n\nSmall caps here");
+await page.keyboard.press("Shift+Home");
+const applySmallcaps = () => page.getByRole("button", { name: "Apply smallcaps" });
+await applySmallcaps().scrollIntoViewIfNeeded();
+await applySmallcaps().click();
+await settle(700);
+await page.getByRole("list", { name: "Project styles" }).scrollIntoViewIfNeeded();
+await shot("22g-style-applied");
+const savedStyles = await page.evaluate(() =>
+  (window.__pfCalls.filter((c) => c.cmd === "project_save" && c.args.meta).at(-1)?.args.meta.styles ?? []).map((s) => s.name),
+);
+console.log("character style applied:", await page.locator(".cm-activeLine").first().textContent(), "· saved styles:", JSON.stringify(savedStyles));
+await applySmallcaps().click();
+await settle(200);
+console.log("character style applied again:", await page.locator(".cm-activeLine").first().textContent());
+
 // Writing mode: math, chips and figures render in place, the cursor's line shows its source,
 // and a click on a widget puts the cursor into its source.
 const modeButton = (name) => page.getByRole("group", { name: "Editor mode" }).getByRole("button", { name, exact: true });

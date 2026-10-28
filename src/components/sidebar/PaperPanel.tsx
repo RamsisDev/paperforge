@@ -7,6 +7,7 @@ import { useStore } from "@/store";
 import { notify } from "../Toaster";
 import { Button, Checkbox, Field, Input, Select, Textarea, cx } from "../ui";
 import { PageSetupPanel } from "./PageSetupPanel";
+import { StylesPanel } from "./StylesPanel";
 
 const DEPTH_LABELS = {
   chapters: ["Chapters", "Chapters and sections", "Down to subsections"],
@@ -177,6 +178,7 @@ export function PaperPanel() {
       </Field>
 
       <LatexSettings />
+      <StylesPanel />
     </div>
   );
 }
