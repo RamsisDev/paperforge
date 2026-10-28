@@ -76,6 +76,88 @@ function stubTauri(fixture) {
     return out.join("\n");
   };
 
+  // Version history: snapshots of the last few days, newest first, in memory.
+  const history = { enabled: true, versions: [] };
+  window.__pfHistory = history;
+  let commit = 0;
+  const snapshotInfo = (kind, minutesAgo, summary, extra = {}) => {
+    const id = ((++commit * 0x9e3779b1) >>> 0).toString(16).padStart(8, "0").repeat(5);
+    return {
+      id,
+      shortId: id.slice(0, 7),
+      kind,
+      label: null,
+      note: null,
+      summary,
+      time: Math.floor(Date.now() / 1000) - minutesAgo * 60,
+      author: "Ada Lovelace",
+      changedParts: ["sections/method.md"],
+      ...extra,
+    };
+  };
+  history.versions = [
+    snapshotInfo("autosave", 4, "Edited: Method"),
+    snapshotInfo("autosave", 21, "Edited: Method"),
+    snapshotInfo("autosave", 47, "Edited: Introduction, Method"),
+    snapshotInfo("version", 70, "Edited: Results · References changed"),
+    snapshotInfo("autosave", 95, "Edited: Results"),
+    snapshotInfo("version", 26 * 60, "Session 27 Oct 09:12–11:40"),
+    snapshotInfo("autosave", 27 * 60, "Edited: Introduction"),
+    snapshotInfo("autosave", 28 * 60, "Added: Results"),
+    snapshotInfo("version", 3 * 24 * 60, "PDF exported", { label: "First draft", note: "Shared with Prof. Smith" }),
+    snapshotInfo("version", 5 * 24 * 60, "Project created"),
+  ];
+  const historyStatus = () => ({
+    enabled: history.enabled,
+    mode: history.enabled ? "own" : "none",
+    branch: history.enabled ? "main" : null,
+    dirty: true,
+    lastVersion: history.enabled ? (history.versions.find((v) => v.kind === "version") ?? null) : null,
+    remote: null,
+  });
+  const NOTES = "sections/notes.md";
+  // One edited part (a phrase replaced in its middle), one deleted part, and settings,
+  // references and a figure in plain language.
+  const historyDiff = (from, to) => {
+    const part = state.parts.find((p) => p.file === "sections/method.md") ?? state.parts[0];
+    const text = part.content;
+    const cut = text.indexOf(" ", Math.floor(text.length / 2)) + 1;
+    const deleted = state.parts.some((p) => p.file === NOTES) ? [] : [
+      {
+        file: NOTES,
+        oldFile: null,
+        title: "Notes",
+        status: "deleted",
+        segments: [{ kind: "delete", text: "# Notes\n\nThings to check before submitting: the entropy bound and the second experiment.\n" }],
+      },
+    ];
+    return {
+      from,
+      to,
+      parts: [
+        {
+          file: part.file,
+          oldFile: null,
+          title: "Method",
+          status: "modified",
+          segments: [
+            { kind: "equal", text: text.slice(0, cut) },
+            { kind: "delete", text: "in an earlier wording " },
+            { kind: "insert", text: "with clearer wording " },
+            { kind: "equal", text: text.slice(cut) },
+          ],
+        },
+        ...deleted,
+      ],
+      meta: [{ field: "title", description: "Title: “Information” → “Measuring Information”" }],
+      bib: [
+        { key: "vaswani2017attention", status: "added" },
+        { key: "shannon1948", status: "modified" },
+      ],
+      files: [{ path: "figures/plot.png", oldPath: null, status: "added" }],
+    };
+  };
+
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
@@ -237,6 +319,48 @@ function stubTauri(fixture) {
               "  journal = {Advances in Neural Information Processing Systems},\n" +
               "  author  = {Vaswani, Ashish and Shazeer, Noam},\n  year    = {2017}\n}\n",
           };
+        case "history_status":
+          return historyStatus();
+        case "history_enable":
+          history.enabled = true;
+          return historyStatus();
+        case "history_autosave": {
+          if (!history.enabled) return null;
+          const taken = snapshotInfo("autosave", 0, args.reason ?? "Edited: Method");
+          history.versions.unshift(taken);
+          return taken;
+        }
+        case "history_save_version": {
+          if (!history.enabled) throw "Version history is off for this project";
+          const saved = snapshotInfo("version", 0, args.reason ?? "Edited: Method", { label: args.label, note: args.note });
+          history.versions.unshift(saved);
+          return saved;
+        }
+        case "history_list": {
+          const shown = history.versions.filter((v) => args.includeAutosaves || v.kind === "version");
+          const start = args.before ? shown.findIndex((v) => v.id === args.before) + 1 : 0;
+          return shown.slice(start, start + args.limit);
+        }
+        case "history_label": {
+          const version = history.versions.find((v) => v.id === args.id);
+          if (version.kind !== "version") throw "Only versions can be named: restore it and save a version";
+          version.label = args.label;
+          return version;
+        }
+        case "history_diff":
+          return historyDiff(args.from, args.to);
+        case "history_read_part":
+          return state.parts.find((p) => p.file === args.file)?.content ?? "";
+        case "history_restore":
+          history.versions.unshift(snapshotInfo("autosave", 0, "Before restoring an earlier version"));
+          history.versions.unshift(snapshotInfo("version", 0, "Restored an earlier version"));
+          return snapshot();
+        case "history_restore_part":
+          if (args.file === NOTES && !state.parts.some((p) => p.file === NOTES)) {
+            state.parts.push({ file: NOTES, content: "# Notes\n\nThings to check before submitting: the entropy bound and the second experiment.\n" });
+          }
+          history.versions.unshift(snapshotInfo("version", 0, "Restored “Notes”"));
+          return snapshot();
         default:
           return null;
       }
@@ -1128,6 +1252,113 @@ console.log("after accept insertion and reject deletion:", JSON.stringify(await 
 await trackButton.click();
 await settle(200);
 console.log("track changes off:", await trackButton.getAttribute("aria-pressed"));
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+
+// Version history: with history off the tab offers to enable it; then the timeline groups days,
+// folds autosaves and shows labels; Save version names a milestone (toolbar and Mod-Shift-S);
+// the compare view covers the editor, restores a part and closes with Close or Escape.
+const historyCalls = (cmd) => page.evaluate((cmd) => window.__pfCalls.filter((c) => c.cmd === cmd).map((c) => c.args), cmd);
+await page.evaluate(() => (window.__pfHistory.enabled = false));
+await page.getByRole("tab", { name: "History", exact: true }).click();
+await page.getByRole("button", { name: "Enable version history" }).waitFor({ timeout: 5000 });
+await settle(200);
+await shot("28a-history-off");
+await page.getByRole("button", { name: "Enable version history" }).click();
+const timelineGroup = page.getByRole("group", { name: "Version history" });
+await timelineGroup.waitFor({ timeout: 5000 });
+await settle(300);
+console.log("history enabled from the banner:", (await historyCalls("history_enable")).length === 1);
+await timelineGroup.getByRole("button", { name: /^3 autosaves/ }).click();
+await settle(200);
+await shot("28b-history-panel");
+console.log(
+  "history timeline:",
+  JSON.stringify(
+    await timelineGroup.locator("section").evaluateAll((sections) =>
+      sections.map((s) => `${s.getAttribute("aria-label")}: ${[...s.querySelectorAll(":scope > ol > li")].map((li) => li.getAttribute("aria-label") ?? li.querySelector("button").innerText.replace(/\s+/g, " ")).join(", ")}`),
+    ),
+  ),
+);
+console.log("status bar:", await page.locator("footer").getByRole("button", { name: /^Last version/ }).textContent());
+
+await page.getByRole("button", { name: "Save version", exact: true }).click();
+const saveDialog = page.getByRole("dialog", { name: "Save version" });
+await saveDialog.getByPlaceholder("e.g. Sent to reviewer").fill("Sent to reviewer");
+await saveDialog.getByPlaceholder(/What changed/).fill("To Prof. Smith, with the new experiment");
+await shot("28c-save-version");
+await saveDialog.getByRole("button", { name: "Save version" }).click();
+await timelineGroup.getByText("Sent to reviewer").waitFor({ timeout: 5000 });
+await saveDialog.waitFor({ state: "detached" });
+console.log(
+  "save version:",
+  JSON.stringify(await historyCalls("history_save_version")),
+  "· status bar:",
+  await page.locator("footer").getByRole("button", { name: /^Last version/ }).getAttribute("title"),
+);
+await page.keyboard.press("ControlOrMeta+Shift+s");
+await saveDialog.waitFor({ timeout: 5000 });
+await page.keyboard.press("Escape");
+await saveDialog.waitFor({ state: "detached" });
+console.log("Mod-Shift-S opened and Escape closed the save version dialog");
+
+const versionRow = (n) => timelineGroup.getByRole("listitem", { name: /^Version / }).nth(n);
+const compareView = page.getByRole("region", { name: "Compare versions" });
+await versionRow(1).hover();
+await versionRow(1).getByRole("button", { name: /^Actions for/ }).click();
+await shot("28d-history-actions");
+await page.getByRole("menuitem", { name: "Compare with current" }).click();
+await compareView.getByRole("region", { name: "Method" }).waitFor({ timeout: 5000 });
+await settle(300);
+await shot("28e-history-compare");
+console.log(
+  "compare:",
+  JSON.stringify(await compareView.locator("span").first().innerText()),
+  "· cards",
+  JSON.stringify(await compareView.locator("section").evaluateAll((s) => s.map((x) => x.getAttribute("aria-label")))),
+  "· ins",
+  JSON.stringify(await compareView.locator("ins").allTextContents()),
+  "· del",
+  JSON.stringify(await compareView.locator("del").allTextContents()),
+  "· folds",
+  JSON.stringify(await compareView.getByRole("button", { name: /^Show \d+/ }).allTextContents()),
+  "· editor still mounted:",
+  await page.locator(".cm-editor").count(),
+);
+console.log("compare lists:", JSON.stringify(await compareView.locator("section ul").allInnerTexts()));
+const foldsBefore = await compareView.getByRole("button", { name: /unchanged word/ }).count();
+await compareView.getByRole("button", { name: /unchanged word/ }).first().click();
+console.log("unchanged runs folded:", foldsBefore, "→ after expanding one:", await compareView.getByRole("button", { name: /unchanged word/ }).count());
+const notesCard = compareView.getByRole("region", { name: "Notes" });
+await notesCard.getByRole("button", { name: "Restore this part" }).click();
+await notesCard.getByRole("alertdialog").getByRole("button", { name: "Restore" }).click();
+await notesCard.waitFor({ state: "detached", timeout: 5000 });
+console.log(
+  "restore part:",
+  JSON.stringify(await historyCalls("history_restore_part")),
+  "· part switcher:",
+  await page.getByRole("button", { name: /^All chapters/ }).getAttribute("aria-label"),
+);
+await compareView.getByRole("button", { name: "Close" }).click();
+await compareView.waitFor({ state: "detached" });
+console.log("compare closed, editor visible:", await page.locator(".cm-editor").isVisible());
+
+await versionRow(1).getByRole("button").first().click();
+await compareView.waitFor({ timeout: 5000 });
+const viewed = (await historyCalls("history_diff")).at(-1);
+await page.keyboard.press("Escape");
+await compareView.waitFor({ state: "detached" });
+console.log("view changes diffed", viewed.from.slice(0, 7), "→", viewed.to?.slice(0, 7), "· Escape closed the compare view");
+
+await versionRow(2).hover();
+await versionRow(2).getByRole("button", { name: /^Actions for/ }).click();
+await page.getByRole("menuitem", { name: /^Restore this version/ }).click();
+await page.getByRole("alertdialog", { name: "Restore version" }).getByRole("button", { name: "Restore" }).click();
+await page.waitForFunction(() => window.__pfCalls.some((c) => c.cmd === "history_restore"), null, { timeout: 5000 });
+await settle(300);
+console.log("restore version:", JSON.stringify(await historyCalls("history_restore")));
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
+await page.locator("footer").getByRole("button", { name: /^Last version/ }).click();
+console.log("status bar opens the History tab:", await page.getByRole("tab", { name: "History", exact: true }).getAttribute("aria-selected"));
 await page.getByRole("tab", { name: "Structure", exact: true }).click();
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
