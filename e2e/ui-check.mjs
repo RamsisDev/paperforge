@@ -641,8 +641,58 @@ console.log(
   (await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd.startsWith("template_")).map((c) => c.cmd))).join(", "),
 );
 
+// Writing mode: math, chips and figures render in place, the cursor's line shows its source,
+// and a click on a widget puts the cursor into its source.
+const modeButton = (name) => page.getByRole("group", { name: "Editor mode" }).getByRole("button", { name, exact: true });
+const activeLineText = () => page.locator(".cm-activeLine").first().textContent();
+async function openChapter(title) {
+  await page.getByRole("button", { name: /^All chapters/ }).click();
+  await page.getByRole("menuitem", { name: new RegExp(title) }).click();
+  await settle(300);
+}
+await editorTabs().first().click();
+await openChapter("Introduction");
+await modeButton("Writing").click();
+await page.locator(".pf-lp-chip").first().waitFor({ timeout: 5000 });
+await page.locator(".cm-line", { hasText: "Write your paper" }).click({ position: { x: 60, y: 8 } });
+await settle(200);
+const heading = () => page.locator(".cm-line.pf-lp-h1").first().textContent();
+const chips = (kind) => page.locator(`.pf-lp-${kind}`).allTextContents();
+console.log("writing mode: citation chips", JSON.stringify(await chips("cite")), "· reference chips", JSON.stringify(await chips("ref")));
+console.log("writing mode: heading away from the cursor:", JSON.stringify(await heading()));
+await shot("23-writing-mode");
+await page.keyboard.press("ControlOrMeta+Home");
+await settle(200);
+console.log("writing mode: heading with the cursor on it:", JSON.stringify(await heading()));
+await shot("23b-writing-heading-source");
+await page.locator(".pf-lp-cite").first().click();
+await settle(200);
+console.log("writing mode: clicked citation chip, cursor line:", JSON.stringify(await activeLineText()));
+await openChapter("Method");
+await page.locator(".pf-lp-math .katex").first().waitFor({ timeout: 5000 });
+await page.locator(".pf-lp-figure img").first().waitFor({ timeout: 5000 });
+await page.mouse.move(5, 890);
+await settle(300);
+console.log(
+  "writing mode: rendered math",
+  await page.locator(".pf-lp-math .katex").count(),
+  "· equation numbers",
+  JSON.stringify(await page.locator(".pf-lp-eqno").allTextContents()),
+  "· figures",
+  JSON.stringify(await page.locator(".pf-lp-caption").allTextContents()),
+);
+await shot("23c-writing-math-figure");
+await modeButton("Source").click();
+await settle(200);
+console.log(
+  "source mode again: widgets",
+  await page.locator(".pf-lp-math, .pf-lp-chip, .pf-lp-figure").count(),
+  "· math source shown:",
+  (await page.locator(".cm-content").textContent()).includes("$$H(X)"),
+);
+
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
-// on one part and on a part 20x longer.
+// on one part and on a part 20x longer, with the cursor in view, in Source and Writing mode.
 await editorTabs().first().click();
 await settle(300);
 async function typingCost(repeat) {
@@ -651,12 +701,14 @@ async function typingCost(repeat) {
     const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
     const { EditorView } = await import(url);
     const view = EditorView.findFromDOM(document.querySelector(".cm-editor"));
+    const original = view.state.doc.toString();
     if (repeat > 1) {
-      const doc = view.state.doc.toString();
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: Array(repeat).fill(doc).join("\n\n") } });
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: Array(repeat).fill(original).join("\n\n") } });
       await new Promise((r) => setTimeout(r, 500));
     }
-    view.dispatch({ selection: { anchor: Math.floor(view.state.doc.length / 2) } });
+    const middle = Math.floor(view.state.doc.length / 2);
+    view.dispatch({ selection: { anchor: middle }, effects: EditorView.scrollIntoView(middle, { y: "center" }) });
+    await new Promise((r) => setTimeout(r, 300));
     const sync = [];
     let longTasks = 0;
     const po = new PerformanceObserver((list) => (longTasks += list.getEntries().length));
@@ -671,11 +723,18 @@ async function typingCost(repeat) {
     po.disconnect();
     sync.sort((a, b) => a - b);
     const lines = view.state.doc.lines;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: original } });
+    await new Promise((r) => setTimeout(r, 300));
     return { lines, p50: sync[150].toFixed(2), p95: sync[285].toFixed(2), max: sync[299].toFixed(2), longTasks };
   }, repeat);
 }
-console.log("typing, one part (ms/keystroke):", JSON.stringify(await typingCost(1)));
-console.log("typing, 20x part (ms/keystroke):", JSON.stringify(await typingCost(20)));
+for (const mode of ["Source", "Writing"]) {
+  await modeButton(mode).click();
+  await settle(300);
+  console.log(`typing, ${mode} mode, one part (ms/keystroke):`, JSON.stringify(await typingCost(1)));
+  console.log(`typing, ${mode} mode, 20x part (ms/keystroke):`, JSON.stringify(await typingCost(20)));
+}
+await modeButton("Source").click();
 await settle(800);
 
 const calls = await page.evaluate(() => window.__pfCalls);
