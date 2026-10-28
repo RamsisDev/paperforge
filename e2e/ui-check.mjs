@@ -142,6 +142,13 @@ function stubTauri(fixture) {
             needsRerun: false,
             convertedParts: args.focus ? 1 : state.parts.length,
             toc: state.toc,
+            labels: {
+              "sec:intro": { number: "1", page: "3" },
+              "sec:method": { number: "2", page: "5" },
+              "eq:entropy": { number: "2.1", page: "5" },
+              "fig:example": { number: "2.1", page: "5" },
+              "tbl:results": { number: "2.1", page: "6" },
+            },
             diagnostics: [
               {
                 severity: "warning",
@@ -326,7 +333,32 @@ await page.keyboard.press("ControlOrMeta+End");
 await page.keyboard.type("\n\nAs shown in @tbl");
 await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
 await shot("12-cite-autocomplete-other-part");
+const completionRows = () =>
+  page
+    .locator(".cm-tooltip-autocomplete li")
+    .evaluateAll((rows) =>
+      rows.map((r) => `${r.querySelector(".cm-completionLabel")?.textContent} (${r.querySelector(".cm-completionDetail")?.textContent ?? ""})`),
+    );
+console.log("label completion:", JSON.stringify(await completionRows()));
 await page.keyboard.press("Escape");
+
+// Reference picker: `/ref` lists labels with their names and inserts the name with the reference.
+await page.keyboard.type(" and /refres");
+await page.locator(".cm-tooltip-autocomplete li", { hasText: "@tbl:results" }).waitFor({ timeout: 5000 });
+await shot("12b-reference-picker");
+console.log("reference picker:", JSON.stringify(await completionRows()));
+await page.keyboard.press("Enter");
+await settle(150);
+console.log("after picking a reference:", await page.locator(".cm-activeLine").first().textContent());
+await page.keyboard.type("\n\n/re");
+await page.locator(".cm-tooltip-autocomplete li", { hasText: "Cross reference" }).click();
+await page.locator(".cm-tooltip-autocomplete li", { hasText: "@fig:example" }).waitFor({ timeout: 5000 });
+console.log("/ref slash command opens the picker:", (await completionRows()).length, "labels");
+await page.keyboard.press("Escape");
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
+await page.keyboard.press("Backspace");
 await page.keyboard.type("\n\n/to");
 await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
 await shot("13-slash-toc");

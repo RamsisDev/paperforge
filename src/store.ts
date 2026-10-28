@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { escapeRegExp, type FindOptions } from "@/editor/findAcrossParts";
-import type { Diagnostic, PaperMeta, Part, TocEntry } from "@/lib/api";
+import type { Diagnostic, LabelRef, PaperMeta, Part, TocEntry } from "@/lib/api";
 
 export const BIB_FILE = "refs.bib";
 export const TEX_FILE = "paper.tex";
@@ -53,6 +53,8 @@ interface State {
   diagnostics: Diagnostic[];
   /** Contents, figures and tables of the last successful compile, as LaTeX numbered them. */
   toc: TocEntry[];
+  /** Label → printed number and page, from the last successful compile. */
+  labels: Record<string, LabelRef>;
   pdf: { data: Uint8Array; version: number } | null;
 
   theme: Theme;
@@ -89,6 +91,7 @@ export const initialProjectState = {
   compile: { state: "idle", ms: null, usedNetwork: false, passes: 0 } as CompileStatus,
   diagnostics: [],
   toc: [],
+  labels: {} as Record<string, LabelRef>,
   pdf: null,
   addingPart: null,
   jump: null,
@@ -113,6 +116,15 @@ export const store = {
   get: useStore.getState,
   set: useStore.setState,
 };
+
+/** What the last successful compile printed for `label` (e.g. "fig:x"); undefined before it. */
+export function labelRef(label: string): LabelRef | undefined {
+  return store.get().labels[label];
+}
+
+export function useLabelRef(label: string): LabelRef | undefined {
+  return useStore((s) => s.labels[label]);
+}
 
 let nonce = 0;
 

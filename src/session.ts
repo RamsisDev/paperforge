@@ -281,6 +281,7 @@ async function runCompile(mode: CompileMode, rerun: number, focus: string | null
     store.set((s) => ({
       diagnostics: out.diagnostics,
       toc: out.ok ? (out.toc ?? []) : s.toc,
+      labels: out.ok ? (out.labels ?? {}) : s.labels,
       compile: {
         state: out.ok ? "ok" : "error",
         ms: out.pandocMs + out.texMs,

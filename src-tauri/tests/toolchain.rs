@@ -384,6 +384,29 @@ async fn latex_errors_point_at_the_fragment_line() {
 
 #[tokio::test]
 #[ignore = "runs the TeX toolchain"]
+async fn sample_labels_get_their_numbers_and_pages() {
+    for template in ["article", "report"] {
+        let tmp = sample_project(template, "");
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        for key in ["fig:example", "tbl:results", "eq:entropy", "sec:method"] {
+            let label = outcome.labels.get(key).unwrap_or_else(|| panic!("{template}: no {key}: {:#?}", outcome.labels));
+            assert!(
+                label.number.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "{template} {key}: {label:?}"
+            );
+            assert!(label.page.parse::<u32>().is_ok_and(|p| p >= 1), "{template} {key}: {label:?}");
+            println!("{template:<8} {key:<12} {:<4} p. {}", label.number, label.page);
+        }
+        if template == "report" {
+            assert_eq!(outcome.labels["sec:method"].number, "2", "{:#?}", outcome.labels);
+            assert!(outcome.labels["fig:example"].number.starts_with("2."), "{:#?}", outcome.labels);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
 async fn synctex_links_markdown_lines_and_pdf_spots_both_ways() {
     for template in ["article", "report"] {
         let tmp = sample_project(template, "");

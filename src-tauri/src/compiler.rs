@@ -4,7 +4,7 @@
 //! Tectonic runs offline first against the cache seeded at install time; it only goes online
 //! when a document asks for a package or BibTeX style the cache does not have.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -126,6 +126,15 @@ pub struct TocEntry {
     pub page: String,
 }
 
+/// What `\ref` and `\pageref` print for a label, from its `\newlabel` in the .aux files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LabelRef {
+    /// `2`, `3.1`; empty for a label outside any numbered unit.
+    pub number: String,
+    /// As LaTeX prints it: `3`, `iv`.
+    pub page: String,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompileOutcome {
@@ -142,6 +151,8 @@ pub struct CompileOutcome {
     pub toc: Vec<TocEntry>,
     /// Parts Pandoc converted in this compile; unchanged parts reuse their fragment.
     pub converted_parts: usize,
+    /// Label → printed number and page, from a successful compile; empty otherwise.
+    pub labels: BTreeMap<String, LabelRef>,
 }
 
 impl CompileOutcome {
@@ -658,6 +669,7 @@ pub async fn compile(
         outcome.pdf_path = Some(build.join("paper.pdf").to_string_lossy().into_owned());
         let aux = read_aux_tree(&build).await;
         outcome.toc = parse_toc(&aux);
+        outcome.labels = parse_labels(&aux);
         let toc_json = serde_json::to_vec(&outcome.toc).expect("toc serializes");
         tokio::fs::write(build.join(TOC_CACHE), toc_json).await.map_err(|e| e.to_string())?;
         // LaTeX does not announce a changed table of contents; a printed list reads the .toc of
@@ -780,6 +792,23 @@ async fn read_aux_tree(build: &Path) -> Vec<String> {
         }
     }
     lines
+}
+
+/// Every `\newlabel` of the .aux tree; a label defined twice keeps its last definition, as LaTeX
+/// does.
+fn parse_labels(aux: &[String]) -> BTreeMap<String, LabelRef> {
+    aux.iter().filter_map(|line| parse_newlabel(line)).collect()
+}
+
+/// `\newlabel{fig:x}{{2}{3}}`; hyperref adds the title, anchor and an empty fifth field:
+/// `\newlabel{fig:x}{{2}{3}{Caption\relax }{figure.caption.2}{}}`. Labels whose value is not a
+/// group of groups (`\newlabel{tocindent-1}{0pt}`) are not references.
+fn parse_newlabel(line: &str) -> Option<(String, LabelRef)> {
+    let (key, rest) = take_group(line.trim().strip_prefix("\\newlabel")?)?;
+    let (value, _) = take_group(rest)?;
+    let (number, rest) = take_group(value)?;
+    let (page, _) = take_group(rest)?;
+    Some((key.trim().to_string(), LabelRef { number: plain_text(number), page: plain_text(page) }))
 }
 
 fn writefile_key(aux: &[String]) -> String {
@@ -1203,6 +1232,58 @@ mod tests {
                 ("toc", "subsection", 3, "1.1.1", "alpha “tests”", "4"),
             ]
         );
+    }
+
+    fn label(number: &str, page: &str) -> LabelRef {
+        LabelRef { number: number.into(), page: page.into() }
+    }
+
+    #[test]
+    fn parses_newlabels_with_and_without_hyperref() {
+        let aux: Vec<String> = [
+            r"\newlabel{fig:plain}{{2}{3}}",
+            r"\newlabel{fig:example}{{1}{2}{A sample figure. Add \texttt {\{.wide\}} to span\relax }{figure.caption.1}{}}",
+            r"\newlabel{sec:method}{{2.1}{4}{Method}{section.2.1}{}}",
+            r"\newlabel{eq:entropy}{{\relax 2.1}{iv}{}{equation.2.1}{}}",
+            r"\newlabel{tbl:results}{{{\bfseries 3}}{\relax 5}{Results}{table.caption.4}{}}",
+            r"\newlabel{sec:intro}{{}{1}{Intro}{section*.1}{}}",
+            r"\newlabel{tocindent-1}{0pt}",
+            r"\newlabel{fig:twice}{{1}{1}}",
+            r"\newlabel{fig:twice}{{4}{6}}",
+            r"\@writefile{toc}{\contentsline {section}{\numberline {1}Intro}{1}{section.1}%}",
+            r"\newlabel{broken}{{1}",
+        ]
+        .map(String::from)
+        .into();
+        let labels = parse_labels(&aux);
+        assert_eq!(
+            labels.into_iter().collect::<Vec<_>>(),
+            [
+                ("eq:entropy".to_string(), label("2.1", "iv")),
+                ("fig:example".to_string(), label("1", "2")),
+                ("fig:plain".to_string(), label("2", "3")),
+                ("fig:twice".to_string(), label("4", "6")),
+                ("sec:intro".to_string(), label("", "1")),
+                ("sec:method".to_string(), label("2.1", "4")),
+                ("tbl:results".to_string(), label("3", "5")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn labels_come_from_the_included_parts_aux_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = "\\relax\n\\@input{part-a.aux}\n\\@input{part-b.aux}\n\\newlabel{LastPage}{{}{9}}\n";
+        std::fs::write(tmp.path().join(AUX_FILE), main).unwrap();
+        std::fs::write(tmp.path().join("part-a.aux"), "\\relax\n\\newlabel{fig:a}{{1.1}{3}{A}{figure.1.1}{}}\n")
+            .unwrap();
+        std::fs::write(tmp.path().join("part-b.aux"), "\\newlabel{tbl:b}{{2.1}{7}{B}{table.2.1}{}}\n").unwrap();
+
+        let labels = parse_labels(&read_aux_tree(tmp.path()).await);
+        assert_eq!(labels.get("fig:a"), Some(&label("1.1", "3")));
+        assert_eq!(labels.get("tbl:b"), Some(&label("2.1", "7")));
+        assert_eq!(labels.get("LastPage"), Some(&label("", "9")));
+        assert_eq!(labels.len(), 3);
     }
 
     #[test]
