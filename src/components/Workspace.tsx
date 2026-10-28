@@ -1,5 +1,5 @@
 import { BookOpen, ChevronsUpDown, FileCode, FileCog, FilePlus, FileText } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
 import { exportPdf, openProjectDialog } from "@/actions";
@@ -13,8 +13,10 @@ import { unitName } from "@/lib/templates";
 import { compileNow, refreshTex, setBib } from "@/session";
 import { BIB_FILE, PREAMBLE_FILE, TEX_FILE, askNewPart, isPartFile, openFile, store, useStore, type EditorFile } from "@/store";
 import { Editor } from "./Editor";
+import { HistoryDiffView } from "./HistoryDiffView";
 import { Preview } from "./Preview";
 import { ProblemsPanel } from "./ProblemsPanel";
+import { SaveVersionHost } from "./SaveVersionDialog";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { notify } from "./Toaster";
@@ -108,6 +110,21 @@ function EditorPane() {
   );
 }
 
+/** The compare view covers the editor, which stays mounted with its undo history and scroll. */
+function EditorArea({ children }: { children: ReactNode }) {
+  const comparing = useStore((s) => s.compare !== null);
+  return (
+    <div className="relative h-full">
+      {children}
+      {comparing && (
+        <div className="absolute inset-0 z-10">
+          <HistoryDiffView />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function extensionOf(path: string): string {
   return path.split(".").pop()?.toLowerCase() ?? "";
 }
@@ -155,6 +172,7 @@ function useShortcuts() {
         Promise.resolve(fn()).catch((err) => notify(String(err), "error"));
       };
       if (key === "s" && !e.shiftKey) act(() => compileNow("full"));
+      else if (key === "s") act(() => store.set({ versionDialog: true }));
       else if (key === "enter") act(() => compileNow("preview"));
       else if (key === "e" && e.shiftKey) act(exportPdf);
       else if (key === "o") act(openProjectDialog);
@@ -183,7 +201,9 @@ export function Workspace() {
           </>
         )}
         <Panel id="editor" defaultSize="39" minSize="22">
-          <EditorPane />
+          <EditorArea>
+            <EditorPane />
+          </EditorArea>
         </Panel>
         <Handle />
         <Panel id="preview" defaultSize="38" minSize="20">
@@ -191,6 +211,7 @@ export function Workspace() {
         </Panel>
       </Group>
       <StatusBar />
+      <SaveVersionHost />
     </div>
   );
 }

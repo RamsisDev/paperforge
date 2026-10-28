@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { escapeRegExp, type FindOptions } from "@/editor/findAcrossParts";
-import type { Diagnostic, LabelRef, PaperMeta, Part, TocEntry } from "@/lib/api";
+import type { Diagnostic, HistoryStatus, LabelRef, PaperMeta, Part, TocEntry, VersionInfo } from "@/lib/api";
 
 export const BIB_FILE = "refs.bib";
 export const TEX_FILE = "paper.tex";
@@ -8,7 +8,7 @@ export const PREAMBLE_FILE = "preamble.tex";
 
 /** A Markdown part path, `BIB_FILE`, `TEX_FILE` or `PREAMBLE_FILE`. */
 export type EditorFile = string;
-export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find" | "comments";
+export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find" | "comments" | "history";
 export type Theme = "light" | "dark";
 /** "writing" renders the Markdown in place; "source" shows it as typed. */
 export type EditorMode = "writing" | "source";
@@ -85,6 +85,17 @@ interface State {
   reviewMode: boolean;
   /** Edits in Markdown parts are recorded as insertions and deletions; remembered per project. */
   trackChanges: boolean;
+
+  /** Null until loaded, or when the backend could not tell. */
+  historyStatus: HistoryStatus | null;
+  /** Snapshots shown in the History tab, newest first. */
+  versions: VersionInfo[];
+  /** Older snapshots exist beyond `versions`. */
+  historyMore: boolean;
+  /** Snapshot ids shown in the compare view instead of the editor; `to: null` is the current text. */
+  compare: { from: string; to: string | null } | null;
+  /** The "Save version" dialog is open. */
+  versionDialog: boolean;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
@@ -114,6 +125,11 @@ export const initialProjectState = {
   pageReveal: null,
   reviewMode: false,
   trackChanges: false,
+  historyStatus: null as HistoryStatus | null,
+  versions: [] as VersionInfo[],
+  historyMore: false,
+  compare: null as State["compare"],
+  versionDialog: false,
 };
 
 export const useStore = create<State>(() => ({
@@ -193,6 +209,10 @@ export function openGallery(mode: GalleryMode) {
 /** Opens the Paper tab at its Contents settings. */
 export function showContentsSettings() {
   store.set((s) => ({ sidebarOpen: true, sidebarTab: "paper", contentsReveal: s.contentsReveal + 1 }));
+}
+
+export function openHistory() {
+  store.set({ sidebarOpen: true, sidebarTab: "history" });
 }
 
 /** Opens the Structure tab asking for the title of a part to insert at `index`. */
