@@ -18,6 +18,7 @@ import {
   isPartFile,
   openFile,
   store,
+  storedTrackChanges,
   useStore,
   type EditorFile,
 } from "@/store";
@@ -64,6 +65,7 @@ export function loadProject(snapshot: ProjectSnapshot) {
     preamble: snapshot.preamble ?? null,
     figures: snapshot.figures,
     activeFile: snapshot.parts[0]?.file ?? BIB_FILE,
+    trackChanges: storedTrackChanges(snapshot.dir),
   });
   rememberProject(snapshot.dir, snapshot.meta.title);
   setWindowTitle(`${snapshot.meta.title || baseName(snapshot.dir)} — PaperForge`);

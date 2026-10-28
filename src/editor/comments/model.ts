@@ -168,10 +168,32 @@ function fencedRanges(text: string): [number, number][] {
   return ranges;
 }
 
-/** Every comment span in `text`, nested ones included, in document order of their `[`. */
-export function parseComments(text: string, base = 0): Comment[] {
-  const out: Comment[] = [];
-  if (!text.includes(`.${COMMENT_CLASS}`)) return out;
+/** A bracketed span with attributes: `[text]{…}`. */
+export interface ClassSpan {
+  /** `[` .. after `}`. */
+  from: number;
+  to: number;
+  /** The Markdown between the brackets. */
+  textFrom: number;
+  textTo: number;
+  /** `{` .. after `}`. */
+  attrsFrom: number;
+  attrsTo: number;
+  text: string;
+  /** The first of `classes` the span has. */
+  className: string;
+  items: AttrItem[];
+}
+
+/** The value of the attribute `key` of a span, or "". */
+export function pairValue(items: readonly AttrItem[], key: string): string {
+  return items.find((it) => it.kind === "pair" && it.key === key)?.value ?? "";
+}
+
+/** Every span in `text` with one of `classes`, nested ones included, in document order of their `[`. */
+export function parseClassSpans(text: string, classes: readonly string[], base = 0): ClassSpan[] {
+  const out: ClassSpan[] = [];
+  if (!classes.some((c) => text.includes(`.${c}`))) return out;
   const fences = fencedRanges(text);
   let fence = 0;
   for (let i = 0; i < text.length; i++) {
@@ -187,8 +209,8 @@ export function parseComments(text: string, base = 0): Comment[] {
       const close = closingBracket(text, i + 1);
       if (close < 0 || text[close + 1] !== "{") continue;
       const attrs = attributeItems(text, close + 1, base);
-      if (!attrs || !attrs.items.some((it) => it.kind === "class" && it.value === COMMENT_CLASS)) continue;
-      const pair = (key: string) => attrs.items.find((it) => it.kind === "pair" && it.key === key)?.value ?? "";
+      const className = attrs && classes.find((c) => attrs.items.some((it) => it.kind === "class" && it.value === c));
+      if (!attrs || !className) continue;
       out.push({
         from: base + i,
         to: base + attrs.end,
@@ -197,15 +219,23 @@ export function parseComments(text: string, base = 0): Comment[] {
         attrsFrom: base + close + 1,
         attrsTo: base + attrs.end,
         text: text.slice(i + 1, close),
-        author: pair("author"),
-        date: pair("date"),
-        body: pair("text"),
-        resolved: pair("resolved") === "true",
+        className,
         items: attrs.items,
       });
     }
   }
   return out;
+}
+
+/** Every comment span in `text`, nested ones included, in document order of their `[`. */
+export function parseComments(text: string, base = 0): Comment[] {
+  return parseClassSpans(text, [COMMENT_CLASS], base).map((span) => ({
+    ...span,
+    author: pairValue(span.items, "author"),
+    date: pairValue(span.items, "date"),
+    body: pairValue(span.items, "text"),
+    resolved: pairValue(span.items, "resolved") === "true",
+  }));
 }
 
 /** The innermost comment whose span contains `pos`. */

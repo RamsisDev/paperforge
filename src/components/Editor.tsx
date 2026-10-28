@@ -4,6 +4,7 @@ import { EditorSelection, EditorState, type ChangeSpec, type Extension, type Tra
 import { EditorView } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { editorBridge } from "@/editor/bridge";
+import { untracked } from "@/editor/changes/track";
 import {
   bibExtensions,
   flashLine,
@@ -77,7 +78,7 @@ export function Editor() {
   function edit(file: EditorFile, changes: ChangeSpec) {
     const text = contents(store.get()).get(file);
     if (text === undefined || file === TEX_FILE) return;
-    const spec: TransactionSpec = { changes, userEvent: "input.replace", annotations: isolateHistory.of("full") };
+    const spec: TransactionSpec = { changes, userEvent: "input.replace", annotations: [isolateHistory.of("full"), untracked.of(true)] };
     const view = viewRef.current;
     if (view && file === current.current) {
       view.dispatch(spec);

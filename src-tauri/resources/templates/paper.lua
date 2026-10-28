@@ -8,6 +8,8 @@
 --   ::: {.x} / [..]{.x}       -> \begin{pf-x}...\end{pf-x} / \pfstylex{...} for project styles
 --   [..]{.comment …}          -> review markup: highlighted with a note in the review PDF
 --                                (`pf-review` metadata), the bare text in the final one
+--   [..]{.insertion …}        -> underlined in the review PDF, the bare text in the final one
+--   [..]{.deletion …}         -> struck through in the review PDF, left out of the final one
 
 local REF_PREFIXES = { fig = true, tbl = true, eq = true, sec = true }
 
@@ -113,6 +115,9 @@ end
 -- $$...$$ {#eq:x}
 local function Para(el)
   local inlines = el.content
+  if #inlines == 0 then
+    return {}
+  end
   local changed = false
   local out = {}
   local i = 1
@@ -390,11 +395,72 @@ local function review_comment(el)
   return out
 end
 
+-- Left where the final PDF drops a deletion, so `close_deletions` can merge the spaces around it
+-- the way Pandoc reads the text once the deletion is accepted.
+local DELETED = "pf-deleted"
+
+local function drop(_)
+  return { pandoc.RawInline(DELETED, "") }
+end
+
+local function review_insertion(el)
+  return review_mark(el.content, "\\pfinsertionhl", "\\pfinsertionbox")
+end
+
+local function review_deletion(el)
+  return review_mark(el.content, "\\pfdeletionhl", "\\pfdeletionbox")
+end
+
 -- Span classes of review markup: `review` renders a span in the review PDF and `final` in the
 -- final one, both returning inlines. The LaTeX commands they emit are defined in `review.rs`.
 local REVIEW_SPANS = {
   comment = { review = review_comment, final = unwrap },
+  insertion = { review = review_insertion, final = unwrap },
+  deletion = { review = review_deletion, final = drop },
 }
+
+local function is_deleted(el)
+  return el.t == "RawInline" and el.format == DELETED
+end
+
+-- Where deletions were dropped, the spaces around them become one (a line break if one of them
+-- is), and none at the edges of the list, as Pandoc reads the text once they are accepted.
+local function close_deletions(inlines)
+  if not inlines:find_if(is_deleted) then
+    return nil
+  end
+  local out = pandoc.List()
+  local gap = pandoc.List()
+  local function flush(at_end)
+    local dropped = gap:find_if(is_deleted)
+    if not dropped then
+      out:extend(gap)
+    elseif #out > 0 and not at_end then
+      local spaces = gap:filter(function(el) return SPACE_INLINES[el.t] end)
+      if #spaces > 0 then
+        out:insert(spaces:find_if(function(el) return el.t == "SoftBreak" end) or spaces[1])
+      end
+    end
+    gap = pandoc.List()
+  end
+  for _, el in ipairs(inlines) do
+    if is_deleted(el) or SPACE_INLINES[el.t] then
+      gap:insert(el)
+    else
+      flush(false)
+      out:insert(el)
+    end
+  end
+  flush(true)
+  return out
+end
+
+-- A block that only held deletions, such as a list item.
+local function drop_emptied(el)
+  if #el.content == 0 then
+    return {}
+  end
+end
 
 local function review_kind(el)
   for _, class in ipairs(el.classes) do
@@ -460,6 +526,7 @@ end
 return {
   { Meta = read_meta, Pandoc = scope_headings_to_file },
   { Pandoc = prepare_review },
-  { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock, Div = Div, Span = Span,
+  { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock, Inlines = close_deletions,
+    Plain = drop_emptied, Div = Div, Span = Span,
     SmallCaps = styled_element("smallcaps"), Underline = styled_element("underline") },
 }

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Code,
   FileArchive,
+  FileDiff,
   FileDown,
   FilePlus,
   FolderOpen,
@@ -38,6 +39,7 @@ import {
 import type { ReactNode } from "react";
 import { exportLatex, exportPdf, exportReviewPdf, revealProject } from "@/actions";
 import { formatting } from "@/editor/commands";
+import { toggleTrackChanges } from "@/editor/changes";
 import { addComment } from "@/editor/comments";
 import { withEditor } from "@/editor/bridge";
 import { baseName } from "@/lib/api";
@@ -186,6 +188,7 @@ export function Toolbar() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const compiling = useStore((s) => s.compile.state === "running");
   const reviewMode = useStore((s) => s.reviewMode);
+  const trackChanges = useStore((s) => s.trackChanges);
   const editingMarkdown = useStore((s) => isPartFile(s.activeFile));
   const chapters = unitName(meta?.template) === "chapter";
   const headingLabels: Partial<Record<Action, string>> = chapters ? { h1: "Chapter", h2: "Section" } : {};
@@ -229,6 +232,14 @@ export function Toolbar() {
           <IconButton label="Add comment" shortcut={`${MOD}⌥C`} disabled={!editingMarkdown} onClick={() => withEditor(addComment)}>
             <MessageSquarePlus size={15} />
           </IconButton>
+          <IconButton
+            label="Track changes"
+            aria-pressed={trackChanges}
+            className={cx(trackChanges && "bg-accent-soft text-accent hover:bg-accent-soft hover:text-accent")}
+            onClick={() => toggleTrackChanges(!trackChanges)}
+          >
+            <FileDiff size={15} />
+          </IconButton>
         </div>
       </div>
 
@@ -251,7 +262,7 @@ export function Toolbar() {
         aria-pressed={reviewMode}
         aria-label="Review"
         onClick={() => setReviewMode(!reviewMode)}
-        title="Review: the preview and Typeset show comments, highlighted with their notes. Export PDF stays final."
+        title="Review: the preview and Typeset show comments with their notes and tracked changes. Export PDF stays final, with every change accepted."
       >
         <MessageSquareText size={14} /> <span className="hidden xl:inline">Review</span>
       </Button>
@@ -273,7 +284,7 @@ export function Toolbar() {
         }
         items={[
           { label: "PDF…", icon: <FileDown size={14} />, shortcut: `${MOD}${SHIFT}E`, onSelect: () => run(exportPdf) },
-          { label: "Review PDF…", icon: <MessageSquareText size={14} />, hint: "with comments", onSelect: () => run(exportReviewPdf) },
+          { label: "Review PDF…", icon: <MessageSquareText size={14} />, hint: "with comments and changes", onSelect: () => run(exportReviewPdf) },
           { label: "LaTeX sources (.zip)…", icon: <FileArchive size={14} />, onSelect: () => run(exportLatex) },
           { label: "Show project folder", icon: <FolderOpen size={14} />, onSelect: () => run(revealProject) },
         ]}

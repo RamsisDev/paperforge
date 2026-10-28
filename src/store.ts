@@ -83,6 +83,8 @@ interface State {
   commentAuthor: string;
   /** Compiles produce the review PDF (comments rendered) instead of the final one. */
   reviewMode: boolean;
+  /** Edits in Markdown parts are recorded as insertions and deletions; remembered per project. */
+  trackChanges: boolean;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
@@ -111,6 +113,7 @@ export const initialProjectState = {
   previewReveal: null,
   pageReveal: null,
   reviewMode: false,
+  trackChanges: false,
 };
 
 export const useStore = create<State>(() => ({
@@ -211,4 +214,16 @@ export function setCommentAuthor(name: string) {
   const commentAuthor = name.trim();
   localStorage.setItem("paperforge.commentAuthor", commentAuthor);
   store.set({ commentAuthor });
+}
+
+const trackChangesKey = (dir: string) => `paperforge.trackChanges:${dir}`;
+
+export function storedTrackChanges(dir: string): boolean {
+  return localStorage.getItem(trackChangesKey(dir)) === "1";
+}
+
+export function setTrackChanges(trackChanges: boolean) {
+  const { dir } = store.get();
+  if (dir) localStorage.setItem(trackChangesKey(dir), trackChanges ? "1" : "0");
+  store.set({ trackChanges });
 }

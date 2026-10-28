@@ -1,6 +1,7 @@
 import type { EditorView } from "@codemirror/view";
 import katex from "katex";
 import type { MathfieldElement } from "mathlive";
+import { untracked } from "@/editor/changes/track";
 import { store } from "@/store";
 import { editedTex, katexMacros, mathAt, mathChange, mathliveMacros, preambleMacros, type MathEdit, type MathSpan, type TexMacro } from "./source";
 import "./math.css";
@@ -126,7 +127,7 @@ export function openMathEditor(view: EditorView, math: MathSpan) {
     const tex = write ? editedTex(edit) : null;
     if (tex !== null && tex.trim()) {
       const target = view.state.doc === doc ? math : mathAt(view.state, math.from);
-      if (target && target.tex === math.tex) view.dispatch({ changes: mathChange(target, tex), userEvent: "input.math" });
+      if (target && target.tex === math.tex) view.dispatch({ changes: mathChange(target, tex), userEvent: "input.math", annotations: untracked.of(true) });
     }
     view.focus();
   }

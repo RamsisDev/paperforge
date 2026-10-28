@@ -65,7 +65,7 @@ function closingBracket(text: string, start: number): number {
 }
 
 /** End (exclusive) of the code span opening at `start`, or the end of its backtick run when unclosed. */
-function codeSpanEnd(text: string, start: number): number {
+export function codeSpanEnd(text: string, start: number): number {
   let n = 1;
   while (text[start + n] === "`") n++;
   const run = "`".repeat(n);

@@ -685,3 +685,58 @@ async fn comments_compile_in_the_final_and_the_review_pdf() {
         println!("{template:<8} review tex {:>5} ms   final tex {:>5} ms", review.tex_ms, outcome.tex_ms);
     }
 }
+
+/// Insertions and deletions over plain words, a citation, inline math, a table cell, a figure
+/// caption, a heading and a footnote, nested with comments: the review PDF colors, underlines
+/// and strikes them, the final PDF prints the accepted text, both offline.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn tracked_changes_compile_in_the_final_and_the_review_pdf() {
+    let change = |kind: &str, text: &str| format!("[{text}]{{.{kind} author=\"Ada L.\" date=\"2026-10-28T13:00\"}}");
+    let (ins, del) = (|t: &str| change("insertion", t), |t: &str| change("deletion", t));
+    for template in ["article", "ieee", "report"] {
+        let tmp = sample_project(template, "");
+        edit_part(tmp.path(), INTRO, |c| {
+            c.replace("# Introduction", &format!("# {}Introduction", ins("A short ")))
+                .replace("[@knuth1984; @lamport1994]", &del("[@knuth1984; @lamport1994]"))
+                .replace("can be measured", &format!("can be {} {}", del("measured"), ins("quantified 100% & more")))
+                + "\nA claim "
+                + &del("[that is [weak]{.comment author=\"Ada L.\" text=\"Why?\"}]")
+                + " with "
+                + &format!("[an {} note]{{.comment author=\"Ada L.\" text=\"Inside\"}}", ins("inserted"))
+                + ".^[A footnote"
+                + &del(" with a deletion")
+                + ".]\n"
+        });
+        edit_part(tmp.path(), METHOD, |c| {
+            c.replace("$H(X) \\ge 0$", &format!("{} {}", del("$H(X) \\ge 0$"), ins("$H(X) \\geq 0$")))
+                .replace("A sample figure.", &format!("A {} figure.", ins("sample")))
+                .replace("| Baseline |", &format!("| {} |", del("Baseline")))
+        });
+
+        let review = compiler::compile(&toolchain(), tmp.path(), CompileMode::Full, None, true).await.unwrap();
+        assert!(review.ok, "{template} review: {:#?}", errors(&review));
+        assert!(!review.used_network, "{template}: the review PDF only uses cached packages and fonts");
+        assert!(undefined(&review).is_empty(), "{template} review: {:#?}", undefined(&review));
+        let review_build = paperforge_lib::review::build_dir(&project::build_dir(tmp.path()), true);
+        let intro = std::fs::read_to_string(review_build.join("part-sections-introduction.tex")).unwrap();
+        assert!(intro.contains("\\pfdeletionbox{\\citep{knuth1984, lamport1994}}"), "{intro}");
+        assert!(intro.contains("\\pfdeletionhl{measured} \\pfinsertionhl{quantified} \\pfinsertionbox{100\\%}"), "{intro}");
+        let method = std::fs::read_to_string(review_build.join("part-sections-method.tex")).unwrap();
+        assert!(method.contains("\\pfdeletionbox{\\(H(X) \\ge 0\\)} \\pfinsertionbox{\\(H(X) \\geq 0\\)}"), "{method}");
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(!outcome.used_network, "{template}");
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        let intro = std::fs::read_to_string(project::build_dir(tmp.path()).join("part-sections-introduction.tex")).unwrap();
+        assert!(intro.contains("can be quantified 100\\% \\& more.") && !intro.contains("knuth1984"), "{template}:\n{intro}");
+        assert!(intro.contains("A claim with an inserted note.\\footnote{A footnote.}"), "{template}:\n{intro}");
+        let method = std::fs::read_to_string(project::build_dir(tmp.path()).join("part-sections-method.tex")).unwrap();
+        assert!(method.contains("\\(H(X) \\geq 0\\)") && !method.contains("Baseline"), "{template}:\n{method}");
+        for tex in [&intro, &method] {
+            assert!(!tex.contains("pfinsertion") && !tex.contains("pfdeletion"), "{template}:\n{tex}");
+        }
+        println!("{template:<8} review tex {:>5} ms   final tex {:>5} ms", review.tex_ms, outcome.tex_ms);
+    }
+}

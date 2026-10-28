@@ -1,6 +1,6 @@
-//! The review PDF: the same document with its review markup rendered (comments now; insertions
-//! and deletions later), compiled into a build directory of its own so switching between the
-//! review and the final PDF never invalidates the other's fragments and .aux files.
+//! The review PDF: the same document with its review markup rendered (comments, insertions and
+//! deletions), compiled into a build directory of its own so switching between the review and
+//! the final PDF never invalidates the other's fragments and .aux files.
 //!
 //! `paper.lua` reads [`METADATA_KEY`] and, per span class in its `REVIEW_SPANS` table, emits
 //! LaTeX commands that [`PREAMBLE`] defines. The final PDF strips the markup in the filter, so
@@ -27,6 +27,9 @@ pub const BUILD_SUBDIR: &str = "review";
 /// and TeX is not in a box; otherwise, and for comments the filter found in footnotes, floats,
 /// tables and headings (`\pfcommentinline`), where `\marginpar` is an error, it is printed
 /// inline after the highlighted text.
+///
+/// Insertions are colored and underlined, deletions colored and struck through: soul's `\ul`
+/// and `\st` for plain words, `\underline` and a rule over a box for anything else.
 pub const PREAMBLE: &str = r"\makeatletter
 \definecolor{pfcomment}{RGB}{255,226,122}
 \definecolor{pfcommentink}{RGB}{150,80,0}
@@ -59,6 +62,14 @@ pub const PREAMBLE: &str = r"\makeatletter
 \DeclareRobustCommand\pfcommentinline[2]{\stepcounter{pfcomment}\pf@inlinenote{#1}{#2}}
 \newcommand\pf@inlinenote[2]{%
   {\footnotesize\textcolor{pfcommentink}{[\pf@commentlabel{#1}} #2\textcolor{pfcommentink}{]}}}
+\definecolor{pfinsertion}{RGB}{0,92,197}
+\definecolor{pfdeletion}{RGB}{196,30,58}
+\newsavebox\pf@changebox
+\DeclareRobustCommand\pfinsertionhl[1]{{\color{pfinsertion}\setulcolor{pfinsertion}\ul{#1}}}
+\DeclareRobustCommand\pfinsertionbox[1]{{\color{pfinsertion}\underline{#1}}}
+\DeclareRobustCommand\pfdeletionhl[1]{{\color{pfdeletion}\setstcolor{pfdeletion}\st{#1}}}
+\DeclareRobustCommand\pfdeletionbox[1]{{\color{pfdeletion}\sbox\pf@changebox{#1}%
+  \rlap{\usebox\pf@changebox}\rule[.5ex]{\wd\pf@changebox}{.4pt}}}
 \makeatother";
 
 /// Where a build in this mode lives: the project's build directory, or its review subdirectory.

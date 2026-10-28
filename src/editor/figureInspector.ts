@@ -3,6 +3,7 @@ import { EditorView, showTooltip, type Tooltip, type TooltipView } from "@codemi
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { FigureInspector, type FigureEdit } from "@/components/FigureInspector";
+import { untracked } from "@/editor/changes/track";
 import { notify } from "@/components/Toaster";
 import { figureLabels, pasteFigures } from "@/components/sidebar/FiguresPanel";
 import { FIGURE_EXTENSIONS, figureFileName, parseFigure, type Figure } from "./figureSyntax";
@@ -19,7 +20,7 @@ function inspectorView(view: EditorView, lineStart: number): TooltipView {
   const apply = (edit: FigureEdit) => {
     const fig = figureOnLine(view.state, lineStart);
     const changes = fig ? edit(fig) : [];
-    if (changes.length) view.dispatch({ changes, userEvent: "input.figure" });
+    if (changes.length) view.dispatch({ changes, userEvent: "input.figure", annotations: untracked.of(true) });
   };
   const render = () => {
     const figure = figureOnLine(view.state, lineStart);
