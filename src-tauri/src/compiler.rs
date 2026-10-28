@@ -2193,6 +2193,61 @@ on two lines.
         }
     }
 
+    const TRACKED: &str = "# Intro [new ]{.insertion author=\"Ada\" date=\"2026-10-28T13:00\"}heading\n\n\
+        Cite [[@knuth1984; @lamport1994]]{.deletion author=\"Ada\" date=\"2026-10-28T13:00\"} [@shannon1948] and [the bound\n\
+        $H(X) \\ge 0$]{.insertion author=\"Alan\"} [$x^2$ ]{.deletion author=\"Alan\"}holds wor[d]{.deletion author=\"A\"}s \
+        [here]{.deletion author=\"A\"}.\n\n\
+        [Gone]{.deletion author=\"A\"} word, then [a [nested]{.insertion author=\"B\"} comment]{.comment author=\"C\" text=\"Note\"} \
+        and [a [commented]{.comment author=\"C\" text=\"Why?\"} cut]{.deletion author=\"A\"} end.\n\n\
+        - A [tight]{.deletion author=\"A\"} item\n- [Only deleted]{.deletion author=\"A\"}\n- Last\n\n\
+        | A | B |\n|---|---|\n| [cell]{.deletion author=\"A\"} x | [2]{.insertion author=\"A\"} |\n\n\
+        Footnote[^n] and [*more*]{.insertion author=\"A\"}.\n\n\
+        [^n]: A [noted]{.deletion author=\"A\"} word.\n\n\
+        A soft\n[break]{.deletion author=\"A\"}\nhere.\n";
+
+    /// `TRACKED` with every change accepted the way the editor accepts them.
+    const ACCEPTED: &str = "# Intro new heading\n\n\
+        Cite [@shannon1948] and the bound\n\
+        $H(X) \\ge 0$ holds wors .\n\n\
+        word, then [a nested comment]{.comment author=\"C\" text=\"Note\"} and end.\n\n\
+        - A item\n-\n- Last\n\n\
+        | A | B |\n|---|---|\n| x | 2 |\n\n\
+        Footnote[^n] and *more*.\n\n\
+        [^n]: A word.\n\n\
+        A soft\nhere.\n";
+
+    #[tokio::test]
+    async fn final_output_is_the_accepted_document() {
+        for chapters in [false, true] {
+            let options = FragmentOptions { chapters, ..SECTIONS };
+            let tex = fragment_tex(TRACKED, options).await;
+            assert_eq!(tex, fragment_tex(ACCEPTED, options).await);
+            assert!(!tex.contains("pfinsertion") && !tex.contains("pfdeletion") && !tex.contains("Gone"), "{tex}");
+            let marked = fragment_tex(&markers::mark_blocks(TRACKED).text, options).await;
+            assert_eq!(marked, fragment_tex(&markers::mark_blocks(ACCEPTED).text, options).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn review_output_marks_insertions_and_deletions() {
+        let tex = mode_fragment_tex(TRACKED, REVIEW).await;
+        for expected in [
+            "Intro \\pfinsertionhl{new} heading",
+            "Cite \\pfdeletionbox{\\citep{knuth1984, lamport1994}} \\citep{shannon1948} and \\pfinsertionhl{the bound}\n\\pfinsertionbox{\\(H(X) \\ge 0\\)} \\pfdeletionbox{\\(x^2\\)} holds",
+            "wor\\pfdeletionhl{d}s \\pfdeletionhl{here}.",
+            "\\pfdeletionhl{Gone} word",
+            "\\pfcommenthl{a} \\pfinsertionhl{nested} \\pfcommenthl{comment}\\pfcommentnote{C}{Note}",
+            "\\pfdeletionhl{a} \\pfcommenthl{commented}\\pfcommentnote{C}{Why?} \\pfdeletionhl{cut} end.",
+            "A \\pfdeletionhl{tight} item",
+            "\\pfdeletionhl{cell} x & \\pfinsertionhl{2}",
+            "\\emph{\\pfinsertionhl{more}}",
+            "\\footnote{A \\pfdeletionhl{noted} word.}",
+            "A soft\n\\pfdeletionhl{break}\nhere.",
+        ] {
+            assert!(tex.contains(expected), "{expected}\nin\n{tex}");
+        }
+    }
+
     /// The fragment without its `%PF:N` lines and the blank line Pandoc puts after each.
     fn without_markers(tex: &str) -> String {
         let mut out = Vec::new();
