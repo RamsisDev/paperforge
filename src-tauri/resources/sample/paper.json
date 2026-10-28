@@ -1,0 +1,12 @@
+{
+  "template": "ieee",
+  "title": "A Sample Paper Typeset with PaperForge",
+  "authors": [
+    { "name": "Ada Lovelace", "affiliation": "Analytical Engine Lab", "email": "ada@example.org" },
+    { "name": "Alan Turing", "affiliation": "University of Manchester", "email": "alan@example.org" }
+  ],
+  "abstract": "This sample shows every feature PaperForge supports: sections, citations, numbered equations, figures, tables and cross references. Edit it or start from scratch.",
+  "keywords": ["typesetting", "LaTeX", "Markdown"],
+  "language": "en",
+  "date": ""
+}

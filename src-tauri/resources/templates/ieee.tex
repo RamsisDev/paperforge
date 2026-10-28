@@ -1,0 +1,37 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{fontspec}
+\setmainfont{texgyretermes}[
+  Extension=.otf,
+  UprightFont=*-regular,
+  BoldFont=*-bold,
+  ItalicFont=*-italic,
+  BoldItalicFont=*-bolditalic]
+\usepackage{amssymb}
+$common()$
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+\title{$title$}
+\author{$for(author)$\IEEEauthorblockN{$author.name$}\IEEEauthorblockA{$author.affiliation$$if(author.email)$\\$author.email$$endif$}$sep$
+\and
+$endfor$}
+\maketitle
+$if(abstract)$
+\begin{abstract}
+$abstract$
+\end{abstract}
+$endif$
+$if(keywords)$
+\begin{IEEEkeywords}
+$for(keywords)$$keywords$$sep$, $endfor$
+\end{IEEEkeywords}
+$endif$
+
+$body$
+
+$if(bibliography)$
+\bibliographystyle{$if(biblio-style)$$biblio-style$$else$IEEEtranN$endif$}
+\bibliography{$for(bibliography)$$bibliography$$sep$,$endfor$}
+$endif$
+\end{document}

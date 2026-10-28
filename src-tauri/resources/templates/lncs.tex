@@ -1,0 +1,28 @@
+\documentclass[runningheads]{llncs}
+\usepackage{fontspec}
+\usepackage{amssymb}
+$common()$
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+\title{$title$}
+\author{$for(author)$$author.name$\inst{$author.n$}$sep$ \and $endfor$}
+\institute{$for(author)$$author.affiliation$$if(author.email)$ \email{$author.email$}$endif$$sep$ \and $endfor$}
+\maketitle
+$if(abstract)$
+\begin{abstract}
+$abstract$
+$if(keywords)$
+\keywords{$for(keywords)$$keywords$$sep$ \and $endfor$}
+$endif$
+\end{abstract}
+$endif$
+
+$body$
+
+$if(bibliography)$
+\bibliographystyle{$if(biblio-style)$$biblio-style$$else$splncs04$endif$}
+\bibliography{$for(bibliography)$$bibliography$$sep$,$endfor$}
+$endif$
+\end{document}

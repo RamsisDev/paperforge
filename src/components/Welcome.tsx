@@ -1,0 +1,95 @@
+import { FilePlus, FlaskConical, FolderOpen, X } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { newProjectDialog, openProjectAt, openProjectDialog } from "@/actions";
+import { forgetProject, recentProjects } from "@/lib/recent";
+import { TEMPLATES } from "@/lib/templates";
+import { notify } from "./Toaster";
+import { MOD } from "./ui";
+
+function Action({ icon, title, detail, onClick }: { icon: ReactNode; title: string; detail: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-3 rounded-xl border border-line bg-panel p-4 text-left transition hover:border-accent hover:shadow-md cursor-default"
+    >
+      <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-soft text-accent">{icon}</span>
+      <span>
+        <span className="block text-[14px] font-medium text-fg">{title}</span>
+        <span className="block text-xs text-muted">{detail}</span>
+      </span>
+    </button>
+  );
+}
+
+function run(task: () => Promise<unknown>) {
+  task().catch((e) => notify(String(e), "error"));
+}
+
+export function Welcome() {
+  const [recent, setRecent] = useState(recentProjects);
+  return (
+    <div className="flex h-full items-center justify-center overflow-auto p-8">
+      <div className="w-full max-w-xl space-y-8">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent font-serif text-lg font-bold text-accent-fg">
+              P
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight text-fg">PaperForge</h1>
+          </div>
+          <p className="text-sm text-muted">
+            Write in Markdown, get a journal-ready PDF. {TEMPLATES.map((t) => t.label).join(", ")} — typeset locally,
+            no TeX installation needed.
+          </p>
+        </div>
+
+        <div className="grid gap-2.5">
+          <Action
+            icon={<FilePlus size={18} />}
+            title="New paper"
+            detail="Start from a blank paper in a folder you choose"
+            onClick={() => run(() => newProjectDialog(false))}
+          />
+          <Action
+            icon={<FlaskConical size={18} />}
+            title="New from sample"
+            detail="A short paper that shows citations, equations, figures and tables"
+            onClick={() => run(() => newProjectDialog(true))}
+          />
+          <Action
+            icon={<FolderOpen size={18} />}
+            title="Open paper…"
+            detail={`A folder with paper.json · ${MOD}O`}
+            onClick={() => run(openProjectDialog)}
+          />
+        </div>
+
+        {recent.length > 0 && (
+          <div className="space-y-1.5">
+            <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Recent</h2>
+            <ul className="overflow-hidden rounded-xl border border-line bg-panel">
+              {recent.map((p) => (
+                <li key={p.dir} className="group flex items-center border-b border-line last:border-0">
+                  <button className="min-w-0 flex-1 px-4 py-2.5 text-left hover:bg-raised cursor-default" onClick={() => run(() => openProjectAt(p.dir))}>
+                    <div className="truncate text-[13px] text-fg">{p.title || "Untitled"}</div>
+                    <div className="truncate font-mono text-[11px] text-faint">{p.dir}</div>
+                  </button>
+                  <button
+                    aria-label={`Remove ${p.title} from recent`}
+                    className="mr-2 hidden rounded p-1 text-faint hover:bg-raised hover:text-fg group-hover:block"
+                    onClick={() => {
+                      forgetProject(p.dir);
+                      setRecent(recentProjects());
+                    }}
+                  >
+                    <X size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

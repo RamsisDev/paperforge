@@ -1,0 +1,300 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --color-bg: var(--pf-bg);
+  --color-panel: var(--pf-panel);
+  --color-raised: var(--pf-raised);
+  --color-line: var(--pf-line);
+  --color-fg: var(--pf-fg);
+  --color-muted: var(--pf-muted);
+  --color-faint: var(--pf-faint);
+  --color-accent: var(--pf-accent);
+  --color-accent-fg: var(--pf-accent-fg);
+  --color-accent-soft: var(--pf-accent-soft);
+  --color-danger: var(--pf-danger);
+  --color-warn: var(--pf-warn);
+  --color-ok: var(--pf-ok);
+}
+
+:root {
+  --pf-bg: #f7f7f8;
+  --pf-panel: #ffffff;
+  --pf-raised: #f1f1f3;
+  --pf-line: #e4e4e7;
+  --pf-fg: #18181b;
+  --pf-muted: #52525b;
+  --pf-faint: #a1a1aa;
+  --pf-accent: #4f46e5;
+  --pf-accent-fg: #ffffff;
+  --pf-accent-soft: #eef2ff;
+  --pf-danger: #dc2626;
+  --pf-warn: #d97706;
+  --pf-ok: #16a34a;
+  --pf-preview-bg: #e9e9ec;
+
+  --pf-syn-heading: #1e1b4b;
+  --pf-syn-emph: #6d28d9;
+  --pf-syn-link: #2563eb;
+  --pf-syn-code: #be185d;
+  --pf-syn-math: #0f766e;
+  --pf-syn-cite: #b45309;
+  --pf-syn-meta: #71717a;
+  color-scheme: light;
+}
+
+.dark {
+  --pf-bg: #0f0f12;
+  --pf-panel: #17171c;
+  --pf-raised: #202027;
+  --pf-line: #2a2a33;
+  --pf-fg: #ececf1;
+  --pf-muted: #a1a1aa;
+  --pf-faint: #63636e;
+  --pf-accent: #818cf8;
+  --pf-accent-fg: #0f0f12;
+  --pf-accent-soft: #1e1b4b;
+  --pf-danger: #f87171;
+  --pf-warn: #fbbf24;
+  --pf-ok: #4ade80;
+  --pf-preview-bg: #0b0b0e;
+
+  --pf-syn-heading: #c7d2fe;
+  --pf-syn-emph: #c4b5fd;
+  --pf-syn-link: #93c5fd;
+  --pf-syn-code: #f9a8d4;
+  --pf-syn-math: #5eead4;
+  --pf-syn-cite: #fcd34d;
+  --pf-syn-meta: #8b8b96;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--pf-bg);
+  color: var(--pf-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea,
+.cm-content {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--pf-faint) 45%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* CodeMirror */
+.cm-editor {
+  height: 100%;
+  font-size: 14px;
+  background: var(--pf-panel);
+  color: var(--pf-fg);
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+:root .cm-editor .cm-scroller {
+  font-family: var(--font-mono);
+  line-height: 1.65;
+}
+:root .cm-editor .cm-content {
+  padding: 16px 0 40vh;
+  max-width: 880px;
+  caret-color: var(--pf-accent);
+}
+:root .cm-editor .cm-line {
+  padding: 0 24px 0 12px;
+}
+:root .cm-editor .cm-gutters {
+  background: var(--pf-panel);
+  color: var(--pf-faint);
+  border-right: none;
+}
+:root .cm-editor .cm-activeLineGutter,
+:root .cm-editor .cm-activeLine {
+  background: color-mix(in srgb, var(--pf-accent) 6%, transparent);
+}
+:root .cm-editor .cm-cursor {
+  border-left-color: var(--pf-accent);
+  border-left-width: 2px;
+}
+:root .cm-editor .cm-selectionBackground,
+:root .cm-editor.cm-focused .cm-selectionBackground,
+:root .cm-editor .cm-content ::selection {
+  background: color-mix(in srgb, var(--pf-accent) 22%, transparent) !important;
+}
+:root .cm-editor .cm-searchMatch {
+  background: color-mix(in srgb, var(--pf-warn) 30%, transparent);
+}
+:root .cm-editor .cm-panels {
+  background: var(--pf-raised);
+  color: var(--pf-fg);
+  border-color: var(--pf-line) !important;
+}
+:root .cm-editor .cm-panel input,
+:root .cm-editor .cm-panel button {
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+:root .cm-editor .cm-tooltip {
+  background: var(--pf-panel);
+  border: 1px solid var(--pf-line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+  overflow: hidden;
+}
+:root .cm-editor .cm-tooltip-autocomplete > ul > li {
+  padding: 3px 10px !important;
+  font-family: var(--font-sans);
+}
+:root .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--pf-accent);
+  color: var(--pf-accent-fg);
+}
+:root .cm-editor .cm-completionDetail {
+  margin-left: 8px;
+  opacity: 0.7;
+  font-style: normal;
+}
+:root .cm-editor .cm-completionInfo {
+  padding: 8px 10px;
+  max-width: 320px;
+  font-family: var(--font-sans);
+}
+.pf-math-tooltip {
+  padding: 10px 14px;
+  font-size: 16px;
+  max-width: 560px;
+}
+.pf-math {
+  color: var(--pf-syn-math);
+}
+.pf-cite {
+  color: var(--pf-syn-cite);
+}
+.pf-attr {
+  color: var(--pf-syn-meta);
+}
+.pf-flash {
+  animation: pf-flash 1.2s ease-out;
+}
+@keyframes pf-flash {
+  from {
+    background: color-mix(in srgb, var(--pf-warn) 45%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+:root .cm-editor .cm-lintRange-error {
+  background-image: none;
+  text-decoration: underline wavy var(--pf-danger);
+  text-underline-offset: 3px;
+}
+:root .cm-editor .cm-lintRange-warning {
+  background-image: none;
+  text-decoration: underline wavy var(--pf-warn);
+  text-underline-offset: 3px;
+}
+:root .cm-editor .cm-diagnostic {
+  font-family: var(--font-sans);
+}
+
+/* PDF preview */
+.pf-page {
+  position: relative;
+  margin: 0 auto 16px;
+  background: white;
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.08),
+    0 4px 16px rgb(0 0 0 / 0.08);
+}
+.pf-page canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.pf-page .textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  opacity: 1;
+  transform-origin: 0 0;
+  z-index: 1;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pf-page .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pf-page .textLayer > :not(.markedContent),
+.pf-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.pf-page .textLayer .markedContent {
+  display: contents;
+}
+.pf-page .textLayer ::selection {
+  background: color-mix(in srgb, #4f46e5 30%, transparent);
+}
+.pf-page .textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+.pf-reveal {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  z-index: 2;
+  border-radius: 2px;
+  animation: pf-flash 1.6s ease-out forwards;
+}

@@ -1,0 +1,78 @@
+name: Build installers
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  # The TeX cache is platform independent; warming it once keeps the bundle host's rate limit
+  # out of the build matrix.
+  tex-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm run sidecars
+      - name: Warm the TeX cache (all templates, en + es)
+        run: |
+          for attempt in 1 2 3; do npm run warm-tex-cache && break; sleep 60; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tex-cache
+          path: src-tauri/resources/tex-cache
+
+  build:
+    needs: tex-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/download-artifact@v4
+        with:
+          name: tex-cache
+          path: src-tauri/resources/tex-cache
+      - run: npm ci
+      - run: npm run sidecars -- ${{ matrix.target }}
+      - run: npm test
+      - name: Offline toolchain check against the shipped cache
+        run: npm run test:toolchain
+      - uses: tauri-apps/tauri-action@v0
+        with:
+          args: --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paperforge-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
