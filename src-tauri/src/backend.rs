@@ -273,6 +273,12 @@ impl Backend {
             dir: String,
             words: Vec<String>,
         }
+        #[derive(Deserialize)]
+        struct FigureImportBytes {
+            dir: String,
+            name: String,
+            data: String,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -354,13 +360,17 @@ impl Backend {
                 let a: DictionaryAdd = parse(args)?;
                 json(project::add_to_dictionary(Path::new(&a.dir), &a.words)?)
             }
+            "figure_import_bytes" => {
+                let a: FigureImportBytes = parse(args)?;
+                json(project::import_figure_bytes(Path::new(&a.dir), &a.name, &a.data)?)
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 22] = [
+pub const COMMANDS: [&str; 23] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -383,6 +393,7 @@ pub const COMMANDS: [&str; 22] = [
     "synctex_to_pdf",
     "dictionary_read",
     "dictionary_add",
+    "figure_import_bytes",
 ];
 
 #[cfg(test)]

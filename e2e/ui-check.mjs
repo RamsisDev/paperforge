@@ -124,6 +124,12 @@ function stubTauri(fixture) {
         }
         case "figure_list":
           return state.figures;
+        case "figure_import_bytes": {
+          // The bytes are not kept, so the path stays out of `figure_list` (no thumbnail to load).
+          const ext = args.name.split(".").pop().toLowerCase();
+          const stem = args.name.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+          return `figures/${stem || "figure"}.${ext}`;
+        }
         case "compile":
           await new Promise((r) => setTimeout(r, 300));
           return {
@@ -332,6 +338,28 @@ await settle(300);
 await page.locator(".pf-math").first().hover();
 await page.waitForSelector(".pf-math-tooltip .katex", { timeout: 5000 });
 await shot("14-math-hover");
+
+// Figure inspector on the sample figure: width slider and the .wide toggle edit only its attributes.
+const figureLine = () => page.locator(".cm-line", { hasText: "figures/example.png" });
+await figureLine().click({ position: { x: 40, y: 8 } });
+await page.getByRole("button", { name: "Edit figure" }).click();
+const inspector = page.getByRole("dialog", { name: "Figure" });
+await inspector.getByRole("slider", { name: "Width" }).fill("50");
+await inspector.getByRole("checkbox", { name: /Span both columns/ }).check();
+await settle(200);
+await shot("14b-figure-inspector");
+console.log("figure after inspector:", await figureLine().textContent());
+await page.keyboard.press("Escape");
+
+// Pasting an image saves it into figures/ and inserts a labelled figure after the cursor's line.
+await page.locator(".cm-content").evaluate((el) => {
+  const data = new DataTransfer();
+  data.items.add(new File([new Uint8Array([137, 80, 78, 71])], "Screen Shot.png", { type: "image/png" }));
+  el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+});
+await page.locator(".cm-line", { hasText: "figures/screen-shot.png" }).waitFor({ timeout: 5000 });
+console.log("pasted figure:", await page.locator(".cm-line", { hasText: "figures/screen-shot.png" }).textContent());
+await page.keyboard.press("Escape");
 
 await page.getByRole("tab", { name: "Refs", exact: true }).click();
 await settle(200);

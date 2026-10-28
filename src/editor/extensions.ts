@@ -45,6 +45,7 @@ import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
 import { spellCheck } from "./spell";
+import { figureTools } from "./figureInspector";
 
 const highlight = HighlightStyle.define([
   { tag: t.heading1, fontWeight: "700", fontSize: "1.25em", color: "var(--pf-syn-heading)" },
@@ -369,6 +370,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     mathTooltip,
     chapterTemplate,
     chapterSectionBadges,
+    figureTools(),
     autocompletion({ override: [slashCompletions, citationCompletions, latexCompletions], icons: false }),
     placeholder("Start writing… Type / for figures, tables and equations, @ to cite."),
     spellCheck,

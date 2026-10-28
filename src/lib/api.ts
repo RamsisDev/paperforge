@@ -139,6 +139,9 @@ export const api = {
   readDictionary: (dir: string) => invoke<string[]>("dictionary_read", { dir }),
   /** Appends new words to the project dictionary; returns the whole list. */
   addToDictionary: (dir: string, words: string[]) => invoke<string[]>("dictionary_add", { dir, words }),
+  /** A pasted figure: `data` is base64. Returns the project-relative path. */
+  importFigureBytes: (dir: string, name: string, data: string) =>
+    invoke<string>("figure_import_bytes", { dir, name, data }),
 };
 
 export interface FolderListing {

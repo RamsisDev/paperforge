@@ -152,6 +152,11 @@ async fn dictionary_add(dir: String, words: Vec<String>) -> Result<Vec<String>, 
     project::add_to_dictionary(Path::new(&dir), &words)
 }
 
+#[tauri::command]
+async fn figure_import_bytes(dir: String, name: String, data: String) -> Result<String, String> {
+    project::import_figure_bytes(Path::new(&dir), &name, &data)
+}
+
 fn build_backend(app: &AppHandle) -> Result<Backend, Box<dyn std::error::Error>> {
     let resources = app.path().resource_dir()?;
     let data = app.path().app_local_data_dir()?;
@@ -204,6 +209,7 @@ pub fn run() {
             synctex_to_pdf,
             dictionary_read,
             dictionary_add,
+            figure_import_bytes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
