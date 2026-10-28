@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::layout;
 use crate::markers::{self, BlockMap, Marked};
 use crate::project::{self, BIB_FILE, BUILD_DIR, PREAMBLE_FILE, PaperMeta};
 
@@ -365,11 +366,13 @@ fn class_options(template: &str, chosen: &[String]) -> Result<Vec<String>, Strin
     Ok(options)
 }
 
-/// `--variable` values of the main document, which Pandoc inserts verbatim: the class options
-/// and the project's `preamble.tex` (at the end of the preamble, via `$header-includes$`).
+/// `--variable` values of the main document, which Pandoc inserts verbatim: the class options,
+/// the page setup and the project's `preamble.tex` (at the end of the preamble, via
+/// `$header-includes$`).
 fn template_variables(template: &str, meta: &PaperMeta, preamble: &str) -> Result<Vec<(&'static str, String)>, String> {
     let mut variables: Vec<(&'static str, String)> =
         class_options(template, &meta.class_options)?.into_iter().map(|o| ("classoption", o)).collect();
+    variables.extend(layout::variables(&meta.layout));
     if !preamble.trim().is_empty() {
         variables.push(("header-includes", preamble.trim_end().to_string()));
     }
@@ -1314,9 +1317,79 @@ mod tests {
         let variables = template_variables("$-- classoption: 11pt\n", &meta, "\\newcommand\\pf{PF}\n\n").unwrap();
         assert_eq!(
             variables,
-            [("classoption", "11pt".into()), ("classoption", "twocolumn".into()), ("header-includes", "\\newcommand\\pf{PF}".into())]
+            [
+                ("classoption", "11pt".into()),
+                ("classoption", "twocolumn".into()),
+                ("geometry", "margin=2.5cm".into()),
+                ("header-includes", "\\newcommand\\pf{PF}".into())
+            ]
         );
-        assert_eq!(template_variables("", &PaperMeta::default(), " \n").unwrap(), []);
+        assert_eq!(template_variables("", &PaperMeta::default(), " \n").unwrap(), [("geometry", "margin=2.5cm".into())]);
+    }
+
+    const OLD_GEOMETRY: &str = "\\usepackage[margin=2.5cm]{geometry}\n";
+
+    /// The main document's LaTeX for `meta` in a fresh project.
+    async fn main_tex_for(tc: &Toolchain, dir: &Path, meta: &PaperMeta) -> String {
+        let build = project::build_dir(dir);
+        std::fs::create_dir_all(&build).unwrap();
+        let frags = fragments(&meta.parts);
+        let out = convert_main(tc, dir, &build, meta, &frags, None, "test").await.unwrap();
+        assert!(out.success, "{}", out.text);
+        std::fs::read_to_string(build.join(TEX_FILE)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn default_layout_reproduces_the_hard_coded_geometry() {
+        let tc = dev_toolchain();
+        for template in ["article", "report", "book"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let meta = project::create(dir, None, template, "", "").unwrap().meta;
+            let tex = main_tex_for(&tc, dir, &meta).await;
+            assert!(tex.contains(&format!("{OLD_GEOMETRY}\\usepackage[numbers")), "{template}:\n{tex}");
+
+            // The same template as it was before page setup, as an ejected copy.
+            let ejected = project::eject_template(dir, &tc.templates).unwrap().meta;
+            let local = dir.join(&ejected.template_file);
+            let text = std::fs::read_to_string(&local).unwrap();
+            let setup = "\\usepackage[$geometry$]{geometry}\n$if(page-setup)$\n$page-setup$\n$endif$\n";
+            assert!(text.contains(setup), "{template}");
+            std::fs::write(&local, text.replace(setup, OLD_GEOMETRY)).unwrap();
+            assert_eq!(main_tex_for(&tc, dir, &ejected).await, tex, "{template}");
+        }
+    }
+
+    #[tokio::test]
+    async fn layout_fills_the_generic_templates_only() {
+        use crate::layout::{Layout, LineSpacing, MainFont, Margins, Slots, Unit};
+        let tc = dev_toolchain();
+        let layout = Layout {
+            margins: Margins { unit: Unit::Mm, top: 30.0, bottom: 20.0, left: 25.0, right: 15.0 },
+            line_spacing: LineSpacing::Onehalf,
+            font: MainFont::Termes,
+            header: Slots { right: "Draft #1".into(), ..Slots::default() },
+            footer: Slots { center: "{page}".into(), ..Slots::default() },
+            line_numbers: true,
+        };
+        for template in ["article", "report", "book", "ieee", "acm", "lncs", "elsevier"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let meta = project::create(tmp.path(), None, template, "", "").unwrap().meta;
+            let tex = main_tex_for(&tc, tmp.path(), &PaperMeta { layout: layout.clone(), ..meta }).await;
+            let generic = ["article", "report", "book"].contains(&template);
+            for expected in [
+                "\\usepackage[top=30mm,bottom=20mm,left=25mm,right=15mm]{geometry}\n\\setmainfont{texgyretermes}",
+                "\\usepackage[onehalfspacing]{setspace}",
+                "\\fancyhead[R]{Draft \\#1}",
+                "\\fancyfoot[C]{\\thepage{}}",
+                "\\linenumbers\n\\usepackage[numbers",
+            ] {
+                assert_eq!(tex.contains(expected), generic, "{template}: {expected}");
+            }
+            for package in ["fancyhdr", "setspace", "lineno"] {
+                assert_eq!(tex.contains(&format!("{{{package}}}")), generic, "{template}: {package}");
+            }
+        }
     }
 
     #[tokio::test]

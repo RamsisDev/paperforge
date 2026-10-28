@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use paperforge_lib::backend::Backend;
 use paperforge_lib::compiler::{self, CompileMode, CompileOutcome, Severity, TEMPLATES, Toolchain};
+use paperforge_lib::layout::{Layout, LineSpacing, MainFont, Margins, Slots, Unit};
 use paperforge_lib::project;
 
 const INTRO: &str = "sections/introduction.md";
@@ -406,6 +407,87 @@ async fn project_preamble_and_class_options_apply() {
         assert!(!broken.ok, "{template}: a removed macro must break the next compile");
         assert!(errors(&broken)[0].message.contains("Undefined control sequence"), "{:#?}", errors(&broken));
     }
+}
+
+fn page_setup(font: MainFont, line_numbers: bool) -> Layout {
+    Layout {
+        margins: Margins { unit: Unit::In, top: 1.0, bottom: 1.0, left: 0.75, right: 0.75 },
+        line_spacing: LineSpacing::Onehalf,
+        font,
+        header: Slots { left: "PaperForge & co.".into(), right: "Draft".into(), ..Slots::default() },
+        footer: Slots { center: "Page {page}".into(), ..Slots::default() },
+        line_numbers,
+    }
+}
+
+/// `[0 0 612 792]`: the first `/MediaBox` of the PDF, in points. xdvipdfmx puts the page
+/// dictionaries in compressed object streams, so every stream is inflated too.
+fn media_box(dir: &Path) -> String {
+    use std::io::Read;
+    let pdf = std::fs::read(project::build_dir(dir).join("paper.pdf")).unwrap();
+    let mut text = String::from_utf8_lossy(&pdf).into_owned();
+    let mut rest = pdf.as_slice();
+    while let Some(at) = rest.windows(7).position(|w| w == b"stream\n" || w == b"stream\r") {
+        rest = &rest[at + 7..];
+        rest = rest.strip_prefix(b"\n").unwrap_or(rest);
+        let mut inflated = Vec::new();
+        if flate2::read::ZlibDecoder::new(rest).read_to_end(&mut inflated).is_ok() {
+            text.push_str(&String::from_utf8_lossy(&inflated));
+        }
+    }
+    let start = text.find("/MediaBox").expect("a MediaBox") + "/MediaBox".len();
+    let end = start + text[start..].find(']').unwrap() + 1;
+    text[start..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// setspace and lineno are not in the seeded cache: the first run of this test downloads them.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain; may download packages"]
+async fn page_setup_applies_to_generic_templates() {
+    for (template, font, line_numbers) in [("article", MainFont::Termes, true), ("report", MainFont::Libertine, false)] {
+        let tmp = sample_project(template, "");
+        update_meta(tmp.path(), |m| {
+            m.class_options = vec!["letterpaper".into(), "twocolumn".into()];
+            m.layout = page_setup(font, line_numbers);
+        });
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        let tex = main_tex(tmp.path());
+        let class = tex.lines().next().unwrap();
+        assert!(class.contains("letterpaper") && class.contains("twocolumn") && !class.contains("a4paper"), "{class}");
+        for expected in [
+            "\\usepackage[top=1in,bottom=1in,left=0.75in,right=0.75in]{geometry}",
+            "\\usepackage[onehalfspacing]{setspace}",
+            "\\fancyhead[L]{PaperForge \\& co.}",
+            "\\fancyfoot[C]{Page \\thepage{}}",
+        ] {
+            assert!(tex.contains(expected), "{template}: {expected}");
+        }
+        assert_eq!(tex.contains("\\linenumbers"), line_numbers, "{template}");
+        assert_eq!(media_box(tmp.path()), "[0 0 612 792]", "{template}");
+        let headheight = outcome.diagnostics.iter().find(|d| d.message.contains("headheight"));
+        assert!(headheight.is_none(), "{template}: {headheight:?}");
+        println!(
+            "{template:<8} letter, two columns, 1.5 spacing, header/footer, {font:?}, line numbers {line_numbers}: \
+             tex {:>5} ms  pages {:>2}  network={}",
+            outcome.tex_ms,
+            page_count(tmp.path()),
+            outcome.used_network
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn journal_templates_ignore_the_page_setup() {
+    let tmp = sample_project("ieee", "");
+    assert!(compile(tmp.path(), CompileMode::Full, None).await.ok);
+    let before = main_tex(tmp.path());
+    update_meta(tmp.path(), |m| m.layout = page_setup(MainFont::Libertine, true));
+    let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+    assert!(outcome.ok, "{:#?}", errors(&outcome));
+    assert_eq!(main_tex(tmp.path()), before);
 }
 
 #[tokio::test]
