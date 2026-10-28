@@ -94,6 +94,8 @@ function stubTauri(fixture) {
           return null;
         case "plugin:dialog|open":
           return state.dir;
+        case "plugin:dialog|save":
+          return `/tmp/${args.options?.defaultPath ?? "export"}`;
         case "project_create":
           state.meta = { ...state.meta, template: args.template, title: args.title || state.meta.title, language: args.language };
           return snapshot();
@@ -965,6 +967,91 @@ await settle(500);
 console.log("generated double-click jumped to:", await editorTab(), "/", JSON.stringify(await activeLineText()));
 await page.evaluate(() => (window.__pfGeneratedTex = false));
 await openChapter("Method");
+
+// Comments: Mod-Alt-C on a selection asks for the commenter's name once, then the text, and wraps
+// only the selection; the panel lists, resolves and deletes; Review compiles with `review`.
+const selectText = (text) =>
+  page.evaluate(async (text) => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    const view = EditorView.findFromDOM(document.querySelector(".cm-editor"));
+    const from = view.state.doc.toString().indexOf(text);
+    view.dispatch({ selection: { anchor: from, head: from + text.length } });
+    view.focus();
+  }, text);
+const methodBefore = await editorText();
+await selectText("works as usual");
+await page.keyboard.press("ControlOrMeta+Alt+c");
+const addBox = page.getByRole("dialog", { name: "Add comment" });
+await addBox.getByLabel("Your name").fill("Ada Lovelace");
+await addBox.getByLabel("Comment").fill('Is "usual" the right word?');
+await shot("26-add-comment");
+await addBox.getByRole("button", { name: "Comment", exact: true }).click();
+await settle(200);
+const commented = (await editorText()).split("\n");
+const changedComment = commented.filter((line, i) => line !== methodBefore.split("\n")[i]);
+console.log("comment Markdown:", JSON.stringify(changedComment));
+console.log(
+  "comment wraps only the selection:",
+  commented.join("\n").replace(/\[(works as usual)\]\{\.comment author="Ada Lovelace" date="[\d-]+T[\d:]+" text="Is \\"usual\\" the right word\?"\}/, "$1") ===
+    methodBefore,
+);
+await selectText("labeled display equations");
+await page.keyboard.press("ControlOrMeta+Alt+c");
+console.log("second comment asks for the name again:", await addBox.getByLabel("Your name").count());
+await addBox.getByLabel("Comment").fill("Say numbered?");
+await addBox.getByLabel("Comment").press("ControlOrMeta+Enter");
+await settle(200);
+await page.getByRole("tab", { name: "Comments", exact: true }).click();
+const commentCards = () => page.getByRole("list", { name: "Comments" }).getByRole("listitem");
+await commentCards().first().waitFor({ timeout: 5000 });
+await settle(200);
+await shot("26b-comments-panel");
+console.log("comments panel:", JSON.stringify(await commentCards().evaluateAll((cards) => cards.map((c) => c.innerText.replace(/\s+/g, " ").trim()))));
+await commentCards().first().getByRole("button", { name: "Resolve comment" }).click();
+await settle(200);
+console.log("after resolve, cards:", await commentCards().count(), "· Markdown:", JSON.stringify((await editorText()).split("\n").find((l) => l.includes("works as usual"))));
+await page.getByText("Show resolved").click();
+console.log("with resolved shown, cards:", await commentCards().count());
+await commentCards().nth(1).getByRole("button", { name: "Delete comment" }).click();
+await settle(200);
+console.log("after delete:", await commentCards().count(), "card(s) · text kept:", (await editorText()).includes("and labeled display equations are numbered"));
+await modeButton("Writing").click();
+await page.locator(".cm-line", { hasText: "Raw LaTeX passes" }).click({ position: { x: 60, y: 8 } });
+await page.locator(".pf-comment-marker").first().waitFor({ timeout: 5000 });
+await page.locator(".pf-comment").first().scrollIntoViewIfNeeded();
+await page.locator(".pf-comment").first().hover();
+await settle(1200);
+await shot("26c-comment-writing-mode");
+console.log(
+  "writing mode: highlighted",
+  JSON.stringify(await page.locator(".pf-comment").allTextContents()),
+  "· marker title",
+  JSON.stringify(await page.locator(".pf-comment-marker").first().getAttribute("title")),
+);
+await page.locator(".pf-comment-marker").first().click();
+const editBox = page.getByRole("dialog", { name: "Edit comment" });
+await editBox.waitFor({ timeout: 5000 });
+await shot("26d-comment-edit-box");
+await editBox.getByRole("button", { name: "Reopen" }).click();
+await settle(200);
+console.log("reopened from the marker:", !(await editorText()).includes("resolved=true"));
+await modeButton("Source").click();
+await settle(200);
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await page.waitForFunction(() => window.__pfCalls.some((c) => c.cmd === "compile" && c.args.review === true), null, { timeout: 5000 });
+await settle(600);
+await shot("26e-review-mode");
+const reviewCompiles = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").slice(-1).map((c) => c.args));
+console.log("review toggle compile:", JSON.stringify(reviewCompiles), "· preview badge:", await page.getByText("Review PDF", { exact: true }).count());
+await page.getByRole("button", { name: "Export" }).click();
+await page.getByRole("menuitem", { name: /Review PDF/ }).click();
+await page.waitForFunction(() => window.__pfCalls.some((c) => c.cmd === "export_pdf"), null, { timeout: 10000 });
+console.log("export review PDF:", JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "export_pdf").map((c) => c.args))));
+await page.getByRole("button", { name: "Review", exact: true }).click();
+await settle(600);
+console.log("review off, last compile review:", await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "compile").at(-1).args.review));
+await page.getByRole("tab", { name: "Structure", exact: true }).click();
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),
 // on one part and on a part 20x longer, with the cursor in view, in Source and Writing mode.

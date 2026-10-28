@@ -183,18 +183,19 @@ export const api = {
   /** Raw bytes over IPC: no JSON number arrays for multi-megabyte PDFs. */
   readBinary: (path: string) => invoke<ArrayBuffer>("read_binary", { path }),
   readTex: (dir: string) => invoke<string>("read_tex", { dir }),
-  compile: (dir: string, mode: CompileMode, focus: string | null) =>
-    invoke<CompileOutcome>("compile", { dir, mode, focus }),
-  exportPdf: (dir: string, dest: string) => invoke<void>("export_pdf", { dir, dest }),
+  /** With `review`, the review PDF: comments rendered, in a build directory of its own. */
+  compile: (dir: string, mode: CompileMode, focus: string | null, review = false) =>
+    invoke<CompileOutcome>("compile", { dir, mode, focus, review }),
+  exportPdf: (dir: string, dest: string, review = false) => invoke<void>("export_pdf", { dir, dest, review }),
   exportZip: (dir: string, dest: string) => invoke<void>("export_zip", { dir, dest }),
   /** Browser only: folders for the in-page folder picker. */
   browse: (path: string | null) => invoke<FolderListing>("_browse", { path }),
   /** The Markdown line typeset at a spot of the last compiled PDF; null without SyncTeX data. */
-  synctexToSource: (dir: string, page: number, x: number, y: number) =>
-    invoke<SourceSpot | null>("synctex_to_source", { dir, page, x, y }),
+  synctexToSource: (dir: string, page: number, x: number, y: number, review = false) =>
+    invoke<SourceSpot | null>("synctex_to_source", { dir, page, x, y, review }),
   /** Where a Markdown line (1-based) of a part was typeset; null without SyncTeX data. */
-  synctexToPdf: (dir: string, part: string, line: number) =>
-    invoke<PdfBox | null>("synctex_to_pdf", { dir, part, line }),
+  synctexToPdf: (dir: string, part: string, line: number, review = false) =>
+    invoke<PdfBox | null>("synctex_to_pdf", { dir, part, line, review }),
   readDictionary: (dir: string) => invoke<string[]>("dictionary_read", { dir }),
   /** Appends new words to the project dictionary; returns the whole list. */
   addToDictionary: (dir: string, words: string[]) => invoke<string[]>("dictionary_add", { dir, words }),

@@ -15,8 +15,8 @@ function slug(title: string): string {
   return s || "paper";
 }
 
-async function freshBuild(): Promise<boolean> {
-  const ok = await compileNow("full");
+async function freshBuild(review = false): Promise<boolean> {
+  const ok = await compileNow("full", review);
   if (!ok) {
     notify("The paper has errors; fix them before exporting.", "error");
     store.set({ problemsOpen: true });
@@ -33,6 +33,20 @@ export async function exportPdf() {
     extension: "pdf",
     write: (dest) => api.exportPdf(dir, dest),
     read: () => api.readBinary(joinPath(dir, ".build/paper.pdf")),
+  });
+  if (saved) notify(`Saved ${baseName(saved)}`);
+}
+
+/** The review PDF: comments highlighted with their notes. */
+export async function exportReviewPdf() {
+  const { dir, meta } = store.get();
+  if (!dir || !(await freshBuild(true))) return;
+  const saved = await saveOutput({
+    defaultName: `${slug(meta?.title ?? "paper")}-review.pdf`,
+    label: "PDF",
+    extension: "pdf",
+    write: (dest) => api.exportPdf(dir, dest, true),
+    read: () => api.readBinary(joinPath(dir, ".build/review/paper.pdf")),
   });
   if (saved) notify(`Saved ${baseName(saved)}`);
 }

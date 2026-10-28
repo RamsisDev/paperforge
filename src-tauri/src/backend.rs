@@ -13,6 +13,7 @@ use tokio::task::AbortHandle;
 use crate::bibfetch;
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
 use crate::project::{self, PaperMeta};
+use crate::review;
 use crate::showlatex;
 use crate::synctex::{self, PdfBox, SourceSpot, SyncTex};
 use crate::zotero;
@@ -122,13 +123,14 @@ impl Backend {
         dir: String,
         mode: CompileMode,
         focus: Option<String>,
+        review: bool,
     ) -> Result<CompileOutcome, String> {
         self.ensure_cache().await?;
         let toolchain = self.toolchain.clone();
         let lock = self.build_lock.clone();
         let task = tokio::spawn(async move {
             let _guard = lock.lock().await;
-            compiler::compile(&toolchain, Path::new(&dir), mode, focus.as_deref()).await
+            compiler::compile(&toolchain, Path::new(&dir), mode, focus.as_deref(), review).await
         });
         if let Some(previous) = self.running.lock().unwrap().replace(task.abort_handle()) {
             previous.abort();
@@ -140,9 +142,9 @@ impl Backend {
         }
     }
 
-    /// The SyncTeX data of the project's last compile, `None` before the first one.
-    async fn synctex(&self, dir: &Path) -> Result<Option<Arc<SyncTex>>, String> {
-        let path = project::build_dir(dir).join(synctex::SYNCTEX_FILE);
+    /// The SyncTeX data of the project's last compile in `build`, `None` before the first one.
+    async fn synctex(&self, build: &Path) -> Result<Option<Arc<SyncTex>>, String> {
+        let path = build.join(synctex::SYNCTEX_FILE);
         let Ok(modified) = tokio::fs::metadata(&path).await.and_then(|m| m.modified()) else {
             return Ok(None);
         };
@@ -160,20 +162,30 @@ impl Backend {
         Ok(Some(sync))
     }
 
-    /// The Markdown line typeset at a spot of a PDF page (1-based, PDF points from the top left).
-    pub async fn synctex_to_source(&self, dir: &str, page: u32, x: f64, y: f64) -> Result<Option<SourceSpot>, String> {
+    /// The Markdown line typeset at a spot of a PDF page (1-based, PDF points from the top left),
+    /// of the final or the review PDF.
+    pub async fn synctex_to_source(
+        &self,
+        dir: &str,
+        page: u32,
+        x: f64,
+        y: f64,
+        review: bool,
+    ) -> Result<Option<SourceSpot>, String> {
         let dir = Path::new(dir);
-        match self.synctex(dir).await? {
-            Some(sync) => synctex::source_at(&sync, dir, page, x, y).await,
+        let build = review::build_dir(&project::build_dir(dir), review);
+        match self.synctex(&build).await? {
+            Some(sync) => synctex::source_at(&sync, dir, &build, page, x, y).await,
             None => Ok(None),
         }
     }
 
-    /// Where a Markdown line (1-based) of a part was typeset.
-    pub async fn synctex_to_pdf(&self, dir: &str, part: &str, line: usize) -> Result<Option<PdfBox>, String> {
+    /// Where a Markdown line (1-based) of a part was typeset in the final or the review PDF.
+    pub async fn synctex_to_pdf(&self, dir: &str, part: &str, line: usize, review: bool) -> Result<Option<PdfBox>, String> {
         let dir = Path::new(dir);
-        match self.synctex(dir).await? {
-            Some(sync) => synctex::pdf_at(&sync, dir, part, line).await,
+        let build = review::build_dir(&project::build_dir(dir), review);
+        match self.synctex(&build).await? {
+            Some(sync) => synctex::pdf_at(&sync, dir, &build, part, line).await,
             None => Ok(None),
         }
     }
@@ -252,11 +264,15 @@ impl Backend {
             dir: String,
             mode: CompileMode,
             focus: Option<String>,
+            #[serde(default)]
+            review: bool,
         }
         #[derive(Deserialize)]
         struct Export {
             dir: String,
             dest: String,
+            #[serde(default)]
+            review: bool,
         }
         #[derive(Deserialize)]
         struct PdfSpot {
@@ -264,12 +280,16 @@ impl Backend {
             page: u32,
             x: f64,
             y: f64,
+            #[serde(default)]
+            review: bool,
         }
         #[derive(Deserialize)]
         struct PartLine {
             dir: String,
             part: String,
             line: usize,
+            #[serde(default)]
+            review: bool,
         }
         #[derive(Deserialize)]
         struct DictionaryAdd {
@@ -359,11 +379,11 @@ impl Backend {
             }
             "compile" => {
                 let a: Compile = parse(args)?;
-                json(self.compile(a.dir, a.mode, a.focus).await?)
+                json(self.compile(a.dir, a.mode, a.focus, a.review).await?)
             }
             "export_pdf" => {
                 let a: Export = parse(args)?;
-                let pdf = project::build_dir(Path::new(&a.dir)).join("paper.pdf");
+                let pdf = review::build_dir(&project::build_dir(Path::new(&a.dir)), a.review).join("paper.pdf");
                 tokio::fs::copy(&pdf, &a.dest).await.map_err(|e| format!("{}: {e}", a.dest))?;
                 json(())
             }
@@ -376,11 +396,11 @@ impl Backend {
             }
             "synctex_to_source" => {
                 let a: PdfSpot = parse(args)?;
-                json(self.synctex_to_source(&a.dir, a.page, a.x, a.y).await?)
+                json(self.synctex_to_source(&a.dir, a.page, a.x, a.y, a.review).await?)
             }
             "synctex_to_pdf" => {
                 let a: PartLine = parse(args)?;
-                json(self.synctex_to_pdf(&a.dir, &a.part, a.line).await?)
+                json(self.synctex_to_pdf(&a.dir, &a.part, a.line, a.review).await?)
             }
             "dictionary_read" => json(project::read_dictionary(Path::new(&parse::<Dir>(args)?.dir))?),
             "dictionary_add" => {

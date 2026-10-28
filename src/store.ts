@@ -8,7 +8,7 @@ export const PREAMBLE_FILE = "preamble.tex";
 
 /** A Markdown part path, `BIB_FILE`, `TEX_FILE` or `PREAMBLE_FILE`. */
 export type EditorFile = string;
-export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find";
+export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find" | "comments";
 export type Theme = "light" | "dark";
 /** "writing" renders the Markdown in place; "source" shows it as typed. */
 export type EditorMode = "writing" | "source";
@@ -79,6 +79,10 @@ interface State {
   pageReveal: { page: number; nonce: number } | null;
   contentsReveal: number;
   find: FindState;
+  /** The name new comments are signed with; "" until the user gives one. */
+  commentAuthor: string;
+  /** Compiles produce the review PDF (comments rendered) instead of the final one. */
+  reviewMode: boolean;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
@@ -106,6 +110,7 @@ export const initialProjectState = {
   jump: null,
   previewReveal: null,
   pageReveal: null,
+  reviewMode: false,
 };
 
 export const useStore = create<State>(() => ({
@@ -120,6 +125,7 @@ export const useStore = create<State>(() => ({
   gallery: null,
   contentsReveal: 0,
   find: { query: "", replace: "", regex: false, matchCase: false, wholeWord: false, skipMarkup: false, focus: 0 },
+  commentAuthor: localStorage.getItem("paperforge.commentAuthor") ?? "",
 }));
 
 export const store = {
@@ -199,4 +205,10 @@ export function setTheme(theme: Theme) {
 export function setEditorMode(editorMode: EditorMode) {
   localStorage.setItem("paperforge.editorMode", editorMode);
   store.set({ editorMode });
+}
+
+export function setCommentAuthor(name: string) {
+  const commentAuthor = name.trim();
+  localStorage.setItem("paperforge.commentAuthor", commentAuthor);
+  store.set({ commentAuthor });
 }

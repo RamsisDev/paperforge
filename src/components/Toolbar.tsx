@@ -19,6 +19,8 @@ import {
   ListOrdered,
   LoaderCircle,
   LogOut,
+  MessageSquarePlus,
+  MessageSquareText,
   Moon,
   PanelLeft,
   Play,
@@ -34,13 +36,14 @@ import {
   TableOfContents,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { exportLatex, exportPdf, revealProject } from "@/actions";
+import { exportLatex, exportPdf, exportReviewPdf, revealProject } from "@/actions";
 import { formatting } from "@/editor/commands";
+import { addComment } from "@/editor/comments";
 import { withEditor } from "@/editor/bridge";
 import { baseName } from "@/lib/api";
 import { splitLevel } from "@/lib/parts";
 import { templateInfo, unitName } from "@/lib/templates";
-import { closeProject, compileNow, splitPart } from "@/session";
+import { closeProject, compileNow, setReviewMode, splitPart } from "@/session";
 import {
   askNewPart,
   isPartFile,
@@ -182,6 +185,7 @@ export function Toolbar() {
   const theme = useStore((s) => s.theme);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const compiling = useStore((s) => s.compile.state === "running");
+  const reviewMode = useStore((s) => s.reviewMode);
   const editingMarkdown = useStore((s) => isPartFile(s.activeFile));
   const chapters = unitName(meta?.template) === "chapter";
   const headingLabels: Partial<Record<Action, string>> = chapters ? { h1: "Chapter", h2: "Section" } : {};
@@ -220,6 +224,12 @@ export function Toolbar() {
             ))}
           </div>
         ))}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <div className="mx-1 h-4 w-px bg-line" />
+          <IconButton label="Add comment" shortcut={`${MOD}⌥C`} disabled={!editingMarkdown} onClick={() => withEditor(addComment)}>
+            <MessageSquarePlus size={15} />
+          </IconButton>
+        </div>
       </div>
 
       <div className="flex-1" />
@@ -235,6 +245,16 @@ export function Toolbar() {
           items={documentMenu(meta.template, editingMarkdown)}
         />
       )}
+      <Button
+        variant="ghost"
+        className={cx("shrink-0", reviewMode && "bg-accent-soft text-accent hover:bg-accent-soft hover:text-accent")}
+        aria-pressed={reviewMode}
+        aria-label="Review"
+        onClick={() => setReviewMode(!reviewMode)}
+        title="Review: the preview and Typeset show comments, highlighted with their notes. Export PDF stays final."
+      >
+        <MessageSquareText size={14} /> <span className="hidden xl:inline">Review</span>
+      </Button>
       <Button
         variant="primary"
         className="shrink-0"
@@ -253,6 +273,7 @@ export function Toolbar() {
         }
         items={[
           { label: "PDF…", icon: <FileDown size={14} />, shortcut: `${MOD}${SHIFT}E`, onSelect: () => run(exportPdf) },
+          { label: "Review PDF…", icon: <MessageSquareText size={14} />, hint: "with comments", onSelect: () => run(exportReviewPdf) },
           { label: "LaTeX sources (.zip)…", icon: <FileArchive size={14} />, onSelect: () => run(exportLatex) },
           { label: "Show project folder", icon: <FolderOpen size={14} />, onSelect: () => run(revealProject) },
         ]}

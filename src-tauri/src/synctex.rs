@@ -289,9 +289,9 @@ fn is_fragment_file(path: &str, fragment: &Fragment) -> bool {
     name.strip_suffix(".tex").unwrap_or(name) == fragment.name
 }
 
-/// The fragment's LaTeX and the part's Markdown it was generated from.
-async fn fragment_sources(dir: &Path, fragment: &Fragment) -> Option<(String, String)> {
-    let tex = project::build_dir(dir).join(format!("{}.tex", fragment.name));
+/// The fragment's LaTeX in `build` and the part's Markdown it was generated from.
+async fn fragment_sources(dir: &Path, build: &Path, fragment: &Fragment) -> Option<(String, String)> {
+    let tex = build.join(format!("{}.tex", fragment.name));
     let tex = tokio::fs::read_to_string(tex).await.ok()?;
     let markdown = tokio::fs::read_to_string(dir.join(&fragment.part)).await.ok()?;
     Some((tex, markdown))
@@ -302,22 +302,29 @@ fn project_fragments(dir: &Path) -> Result<Vec<Fragment>, String> {
 }
 
 /// The Markdown line typeset at a spot of the PDF; `None` outside the parts (title, abstract,
-/// bibliography) or without SyncTeX data for it.
-pub async fn source_at(sync: &SyncTex, dir: &Path, page: u32, x: f64, y: f64) -> Result<Option<SourceSpot>, String> {
+/// bibliography) or without SyncTeX data for it. `build` holds the compile `sync` comes from.
+pub async fn source_at(
+    sync: &SyncTex,
+    dir: &Path,
+    build: &Path,
+    page: u32,
+    x: f64,
+    y: f64,
+) -> Result<Option<SourceSpot>, String> {
     let Some(spot) = sync.to_source(page, x, y) else { return Ok(None) };
     let fragments = project_fragments(dir)?;
     let Some(fragment) = fragments.iter().find(|f| is_fragment_file(&spot.file, f)) else { return Ok(None) };
-    let Some((tex, markdown)) = fragment_sources(dir, fragment).await else { return Ok(None) };
+    let Some((tex, markdown)) = fragment_sources(dir, build, fragment).await else { return Ok(None) };
     let line = BlockMap::new(&tex, &markdown).markdown_line(spot.line);
     Ok(line.map(|line| SourceSpot { part: fragment.part.clone(), line }))
 }
 
 /// Where a Markdown line of a part was typeset: its own fragment line when TeX recorded it,
 /// else the nearest recorded line of the same block.
-pub async fn pdf_at(sync: &SyncTex, dir: &Path, part: &str, line: usize) -> Result<Option<PdfBox>, String> {
+pub async fn pdf_at(sync: &SyncTex, dir: &Path, build: &Path, part: &str, line: usize) -> Result<Option<PdfBox>, String> {
     let fragments = project_fragments(dir)?;
     let Some(fragment) = fragments.iter().find(|f| f.part == part) else { return Ok(None) };
-    let Some((tex, markdown)) = fragment_sources(dir, fragment).await else { return Ok(None) };
+    let Some((tex, markdown)) = fragment_sources(dir, build, fragment).await else { return Ok(None) };
     let Some((tex_line, (start, end))) = BlockMap::new(&tex, &markdown).tex_line(line) else { return Ok(None) };
     let mut nearest = (tex_line..=end).chain((start..tex_line).rev());
     Ok(nearest.find_map(|l| sync.to_pdf(|f| is_fragment_file(f, fragment), l)))

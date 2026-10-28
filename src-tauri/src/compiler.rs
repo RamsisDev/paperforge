@@ -19,6 +19,7 @@ use tokio::task::JoinSet;
 use crate::layout;
 use crate::markers::{self, BlockMap, Marked};
 use crate::project::{self, BIB_FILE, BUILD_DIR, PREAMBLE_FILE, PaperMeta};
+use crate::review;
 use crate::styles;
 
 /// The default relay redirects to a mirror that is unreachable; this host serves the same bundle.
@@ -559,6 +560,7 @@ fn pandoc_diagnostics(out: &RunOutput, part: Option<&str>) -> Vec<Diagnostic> {
 struct FragmentOptions {
     chapters: bool,
     numeric_only: bool,
+    review: bool,
 }
 
 struct Conversion {
@@ -579,7 +581,7 @@ async fn convert_parts(
     pandoc_id: &str,
 ) -> Result<Conversion, String> {
     let filter = tokio::fs::read(tc.templates.join("paper.lua")).await.map_err(|e| e.to_string())?;
-    let flags = [u8::from(options.chapters), u8::from(options.numeric_only)];
+    let flags = [u8::from(options.chapters), u8::from(options.numeric_only), u8::from(options.review)];
     let limit = Arc::new(Semaphore::new(std::thread::available_parallelism().map_or(4, |n| n.get())));
     let mut conversion = Conversion { ok: true, converted: 0, diagnostics: Vec::new() };
     let mut jobs = JoinSet::new();
@@ -656,9 +658,12 @@ fn pandoc_fragment(
     if !style_classes.is_empty() {
         cmd.arg(format!("--metadata={}:{style_classes}", styles::METADATA_KEY));
     }
+    if options.review {
+        cmd.arg(format!("--metadata={}:true", review::METADATA_KEY));
+    }
     cmd.arg(format!(
         "--output={}",
-        Path::new(BUILD_DIR).join(fragment.tex_file()).display()
+        review::build_dir(Path::new(BUILD_DIR), options.review).join(fragment.tex_file()).display()
     ));
     cmd
 }
@@ -721,11 +726,14 @@ pub async fn flatten_tex(dir: &Path) -> Result<String, String> {
     Ok(out)
 }
 
+/// Compiles the final PDF, or with `review` the review PDF (see [`review`]) in a build
+/// directory of its own.
 pub async fn compile(
     tc: &Toolchain,
     dir: &Path,
     mode: CompileMode,
     focus: Option<&str>,
+    review: bool,
 ) -> Result<CompileOutcome, String> {
     let meta = project::read_meta(dir)?;
     if !TEMPLATES.contains(&meta.template.as_str()) {
@@ -735,7 +743,7 @@ pub async fn compile(
         return Err("The document has no parts".into());
     }
     styles::validate(&meta.styles)?;
-    let build = project::build_dir(dir);
+    let build = review::build_dir(&project::build_dir(dir), review);
     tokio::fs::create_dir_all(&build).await.map_err(|e| e.to_string())?;
     // A class's .aux commands are not defined in another class, and an ejected copy may load
     // another class.
@@ -752,7 +760,7 @@ pub async fn compile(
 
     let mut outcome = CompileOutcome::default();
     let started = Instant::now();
-    let options = FragmentOptions { chapters, numeric_only: numeric_only_citations(&meta) };
+    let options = FragmentOptions { chapters, numeric_only: numeric_only_citations(&meta), review };
     let style_classes = styles::metadata(&meta.styles);
     let includeonly = focus
         .filter(|_| chapters && mode == CompileMode::Preview)
@@ -761,7 +769,7 @@ pub async fn compile(
     // The main document only names the fragments, so it converts alongside them.
     let (parts, main) = tokio::join!(
         convert_parts(tc, dir, &build, &fragments, options, &style_classes, &pandoc_id),
-        convert_main(tc, dir, &build, &meta, &fragments, includeonly, &pandoc_id),
+        convert_main(tc, dir, &build, &meta, &fragments, includeonly, review, &pandoc_id),
     );
     let (parts, main) = (parts?, main?);
     outcome.converted_parts = parts.converted;
@@ -823,16 +831,24 @@ async fn convert_main(
     meta: &PaperMeta,
     fragments: &[Fragment],
     includeonly: Option<&str>,
+    review: bool,
     pandoc_id: &str,
 ) -> Result<RunOutput, String> {
     let has_bib = tokio::fs::metadata(dir.join(BIB_FILE)).await.is_ok_and(|m| m.len() > 0);
-    let meta_json = serde_json::to_vec(&pandoc_metadata(meta, has_bib)).expect("json");
+    let mut doc = pandoc_metadata(meta, has_bib);
+    if review {
+        doc[review::METADATA_KEY] = json!(true);
+    }
+    let meta_json = serde_json::to_vec(&doc).expect("json");
     let markdown = main_markdown(fragments, uses_chapters(&meta.template));
     let template = &template_path(tc, dir, meta)?;
     let template_text = tokio::fs::read_to_string(template)
         .await
         .map_err(|e| format!("{}: {e}", template.display()))?;
-    let preamble = read_or_empty(&dir.join(PREAMBLE_FILE)).await;
+    let mut preamble = read_or_empty(&dir.join(PREAMBLE_FILE)).await;
+    if review {
+        preamble = format!("{}\n{preamble}", review::PREAMBLE);
+    }
     let variables = template_variables(&template_text, meta, &preamble)?;
     let mut templates = templates_fingerprint(&tc.templates).await;
     if let Some(own) = template.parent().filter(|p| *p != tc.templates) {
@@ -1384,7 +1400,7 @@ mod tests {
         let build = project::build_dir(dir);
         std::fs::create_dir_all(&build).unwrap();
         let frags = fragments(&meta.parts);
-        let out = convert_main(tc, dir, &build, meta, &frags, None, "test").await.unwrap();
+        let out = convert_main(tc, dir, &build, meta, &frags, None, false, "test").await.unwrap();
         assert!(out.success, "{}", out.text);
         std::fs::read_to_string(build.join(TEX_FILE)).unwrap()
     }
@@ -1456,7 +1472,7 @@ mod tests {
         let main = |meta: PaperMeta| {
             let (tc, frags, build) = (&tc, &frags, &build);
             async move {
-                let out = convert_main(tc, dir, build, &meta, frags, None, "test").await.unwrap();
+                let out = convert_main(tc, dir, build, &meta, frags, None, false, "test").await.unwrap();
                 assert!(out.success, "{}", out.text);
                 std::fs::read_to_string(build.join(TEX_FILE)).unwrap()
             }
@@ -1483,7 +1499,7 @@ mod tests {
         assert!(tex.contains("% edited partial"), "an edited partial invalidates the cache");
 
         let escaping = PaperMeta { template_file: "../article.tex".into(), ..meta };
-        assert!(convert_main(&tc, dir, &build, &escaping, &frags, None, "test").await.is_err());
+        assert!(convert_main(&tc, dir, &build, &escaping, &frags, None, false, "test").await.is_err());
     }
 
     #[test]
@@ -1706,7 +1722,7 @@ mod tests {
             let (tc, frags, build) = (&tc, &frags, &build);
             async move { convert_parts(tc, dir, build, frags, options, "", "test").await.unwrap() }
         };
-        let sections = FragmentOptions { chapters: false, numeric_only: false };
+        let sections = FragmentOptions { chapters: false, numeric_only: false, review: false };
 
         let first = convert(sections).await;
         assert!(first.ok && first.converted == 2, "{:?}", first.diagnostics);
@@ -1718,7 +1734,7 @@ mod tests {
         assert_eq!(convert(sections).await.converted, 1);
         assert!(std::fs::read_to_string(build.join("part-b.tex")).unwrap().contains("Edited."));
 
-        let chapters = convert(FragmentOptions { chapters: true, numeric_only: false }).await;
+        let chapters = convert(FragmentOptions { chapters: true, numeric_only: false, review: false }).await;
         assert_eq!(chapters.converted, 2);
         assert!(std::fs::read_to_string(build.join("part-a.tex")).unwrap().contains("\\chapter{A}"));
     }
@@ -1740,7 +1756,7 @@ mod tests {
         let convert = |chapters| {
             let (tc, frags, build) = (&tc, &frags, &build);
             async move {
-                let options = FragmentOptions { chapters, numeric_only: false };
+                let options = FragmentOptions { chapters, numeric_only: false, review: false };
                 let conversion = convert_parts(tc, dir, build, frags, options, "", "test").await.unwrap();
                 assert!(conversion.ok, "{:?}", conversion.diagnostics);
                 std::fs::read_to_string(build.join("part-a.tex")).unwrap()
@@ -1774,7 +1790,7 @@ mod tests {
         std::fs::create_dir_all(&build).unwrap();
         std::fs::write(tmp.path().join("a.md"), "# A\n").unwrap();
         let frags = fragments(&["a.md".into(), "missing.md".into()]);
-        let options = FragmentOptions { chapters: false, numeric_only: false };
+        let options = FragmentOptions { chapters: false, numeric_only: false, review: false };
         let result = convert_parts(&tc, tmp.path(), &build, &frags, options, "", "test").await.unwrap();
         assert!(!result.ok);
         let error = result.diagnostics.iter().find(|d| d.severity == Severity::Error).unwrap();
@@ -1913,7 +1929,7 @@ on two lines.
 
     #[tokio::test]
     async fn styled_divs_and_spans_become_environments_and_commands() {
-        let options = FragmentOptions { chapters: false, numeric_only: false };
+        let options = FragmentOptions { chapters: false, numeric_only: false, review: false };
         let tc = dev_toolchain();
         let tex = fragment_tex_with(&tc, STYLED, options, "div:note span:key-word2 span:smallcaps").await;
         assert!(
@@ -1943,7 +1959,7 @@ on two lines.
         let tc = dev_toolchain();
         let marked = markers::mark_blocks(EVERY_BLOCK).text;
         for chapters in [false, true] {
-            let options = FragmentOptions { chapters, numeric_only: false };
+            let options = FragmentOptions { chapters, numeric_only: false, review: false };
             for markdown in [EVERY_BLOCK, marked.as_str(), STYLED] {
                 let expected = fragment_tex_with(&before, markdown, options, "").await;
                 assert_eq!(fragment_tex_with(&tc, markdown, options, "").await, expected);
@@ -1996,7 +2012,7 @@ on two lines.
         std::fs::create_dir_all(&build).unwrap();
         let meta = project::read_meta(dir).unwrap();
         let frags = fragments(&meta.parts);
-        let options = FragmentOptions { chapters: false, numeric_only: false };
+        let options = FragmentOptions { chapters: false, numeric_only: false, review: false };
         let parts = |classes: &'static str| {
             let (tc, frags, build) = (&tc, &frags, &build);
             async move { convert_parts(tc, dir, build, frags, options, classes, "test").await.unwrap().converted }
@@ -2012,7 +2028,7 @@ on two lines.
         let main = |meta: PaperMeta| {
             let (tc, frags, build) = (&tc, &frags, &build);
             async move {
-                let out = convert_main(tc, dir, build, &meta, frags, None, "test").await.unwrap();
+                let out = convert_main(tc, dir, build, &meta, frags, None, false, "test").await.unwrap();
                 assert!(out.success, "{}", out.text);
                 std::fs::read_to_string(build.join(TEX_FILE)).unwrap()
             }
@@ -2024,6 +2040,157 @@ on two lines.
         styled.styles[1].latex = "\\textbf{#1}".into();
         assert!(main(styled).await.contains("\\newcommand{\\pfstylesmallcaps}[1]{\\textbf{#1}}"));
         assert!(!main(meta).await.contains("pfstyle"));
+    }
+
+    const COMMENTED: &str = "# Intro [heading]{.comment author=\"Ada\" text=\"Shorter?\"}\n\n\
+        Cite [with [@knuth1984; @lamport1994] or\nin the text]{.comment author=\"Ada\" date=\"2026-10-28T13:00\" text=\"Which one?\"}: \
+        @shannon1948 showed that [$H(X) \\ge 0$]{.comment author=\"Alan\" text=\"100% \\\"sure\\\" {x} \\\\ #1\"} holds.\n\n\
+        - A [*tight* item]{.comment author=\"\" text=\"List\"}\n- [Done]{.comment author=\"Ada\" text=\"Fixed\" resolved=true} here.\n\n\
+        | A | B |\n|---|---|\n| [cell]{.comment author=\"Ada\" text=\"In a table\"} | 2 |\n\n\
+        Footnote[^n] and [a [nested]{.comment author=\"B\" text=\"Inner\"} one]{.comment author=\"A\" text=\"Outer\"}.\n\n\
+        [^n]: A [noted]{.comment author=\"Ada\" text=\"In a note\"} word.\n";
+
+    const UNCOMMENTED: &str = "# Intro heading\n\n\
+        Cite with [@knuth1984; @lamport1994] or\nin the text: \
+        @shannon1948 showed that $H(X) \\ge 0$ holds.\n\n\
+        - A *tight* item\n- Done here.\n\n\
+        | A | B |\n|---|---|\n| cell | 2 |\n\n\
+        Footnote[^n] and a nested one.\n\n\
+        [^n]: A noted word.\n";
+
+    const SECTIONS: FragmentOptions = FragmentOptions { chapters: false, numeric_only: false, review: false };
+    const REVIEW: FragmentOptions = FragmentOptions { review: true, ..SECTIONS };
+
+    /// Like `fragment_tex`, reading the fragment from the build directory of `options`' mode.
+    async fn mode_fragment_tex(markdown: &str, options: FragmentOptions) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = review::build_dir(&project::build_dir(tmp.path()), options.review);
+        std::fs::create_dir_all(&build).unwrap();
+        let fragment = Fragment { part: "a.md".into(), name: "part-a".into() };
+        let cmd = pandoc_fragment(&dev_toolchain(), tmp.path(), &fragment, options, "");
+        let out = run(cmd, PANDOC_TIMEOUT, Some(markdown.as_bytes().to_vec())).await.unwrap();
+        assert!(out.success, "{}", out.text);
+        std::fs::read_to_string(build.join("part-a.tex")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn final_output_strips_comments() {
+        let marked = markers::mark_blocks(COMMENTED).text;
+        assert_eq!(markers::mark_blocks(UNCOMMENTED).lines, markers::mark_blocks(COMMENTED).lines);
+        for chapters in [false, true] {
+            let options = FragmentOptions { chapters, ..SECTIONS };
+            assert_eq!(fragment_tex(COMMENTED, options).await, fragment_tex(UNCOMMENTED, options).await);
+            let tex = fragment_tex(&marked, options).await;
+            assert_eq!(tex, fragment_tex(&markers::mark_blocks(UNCOMMENTED).text, options).await);
+            assert!(!tex.contains("pfcomment"), "{tex}");
+        }
+    }
+
+    #[tokio::test]
+    async fn review_output_highlights_comments_with_their_notes() {
+        let tex = mode_fragment_tex(COMMENTED, REVIEW).await;
+        for expected in [
+            "\\section{\\texorpdfstring{Intro \\pfcommenthl{heading}\\pfcommentinline{Ada}{Shorter?}}{Intro }}",
+            "Cite \\pfcommenthl{with} \\pfcommentbox{\\citep{knuth1984, lamport1994}} \\pfcommenthl{or\nin the text}\\pfcommentnote{Ada}{Which one?}:",
+            "\\pfcommentbox{\\(H(X) \\ge 0\\)}\\pfcommentnote{Alan}{100\\% \"sure\" \\{x\\} \\textbackslash{} \\#1}",
+            "A \\emph{\\pfcommenthl{tight}} \\pfcommenthl{item}\\pfcommentnote{}{List}",
+            "\\item\n  Done here.",
+            "\\pfcommenthl{cell}\\pfcommentinline{Ada}{In a table} & 2",
+            "\\pfcommenthl{a} \\pfcommenthl{nested}\\pfcommentnote{B}{Inner} \\pfcommenthl{one}\\pfcommentnote{A}{Outer}.",
+            "\\footnote{A \\pfcommenthl{noted}\\pfcommentinline{Ada}{In a note} word.}",
+        ] {
+            assert!(tex.contains(expected), "{expected}\nin\n{tex}");
+        }
+        assert!(!tex.contains("Fixed"), "a resolved comment is not printed:\n{tex}");
+    }
+
+    #[tokio::test]
+    async fn review_marks_words_soul_cannot_read_as_boxes() {
+        let tex = mode_fragment_tex(
+            "[50% of \\_x and `code`, a [link](https://x.org) and \"quotes\"]{.comment author=\"A\" text=\"T\"}\n",
+            REVIEW,
+        )
+        .await;
+        assert_eq!(
+            tex.trim_end(),
+            "\\pfcommentbox{50\\%} \\pfcommenthl{of} \\pfcommentbox{\\_x} \\pfcommenthl{and} \\pfcommentbox{\\texttt{code}}\\pfcommenthl{, \
+             a} \\pfcommentbox{\\href{https://x.org}{link}} \\pfcommenthl{and} ``\\pfcommenthl{quotes}''\
+             \\pfcommentnote{A}{T}"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_flag_keeps_a_build_directory_of_its_own() {
+        let tc = dev_toolchain();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("a.md"), COMMENTED).unwrap();
+        let frags = fragments(&["a.md".into()]);
+        let final_build = project::build_dir(dir);
+        let review_build = review::build_dir(&final_build, true);
+        assert_eq!(review_build, dir.join(".build/review"));
+        for build in [&final_build, &review_build] {
+            std::fs::create_dir_all(build).unwrap();
+        }
+        let convert = |options: FragmentOptions| {
+            let (tc, frags) = (&tc, &frags);
+            let build = if options.review { review_build.clone() } else { final_build.clone() };
+            async move {
+                let conversion = convert_parts(tc, dir, &build, frags, options, "", "test").await.unwrap();
+                assert!(conversion.ok, "{:?}", conversion.diagnostics);
+                (conversion.converted, std::fs::read_to_string(build.join("part-a.tex")).unwrap())
+            }
+        };
+        let (converted, final_tex) = convert(SECTIONS).await;
+        assert_eq!(converted, 1);
+        assert!(!final_tex.contains("pfcomment"));
+        let (converted, review_tex) = convert(REVIEW).await;
+        assert_eq!(converted, 1);
+        assert!(review_tex.contains("\\pfcommentnote{Ada}{Which one?}"));
+        assert_eq!(convert(SECTIONS).await, (0, final_tex));
+        assert_eq!(convert(REVIEW).await, (0, review_tex));
+        remove_stale_fragments(&final_build, &frags).await;
+        assert!(review_build.join("part-a.tex").exists(), "the final build leaves the review build alone");
+
+        let meta = PaperMeta { parts: vec!["a.md".into()], ..PaperMeta::default() };
+        let main = |review: bool| {
+            let (tc, frags, meta) = (&tc, &frags, &meta);
+            let build = if review { review_build.clone() } else { final_build.clone() };
+            async move {
+                let out = convert_main(tc, dir, &build, meta, frags, None, review, "test").await.unwrap();
+                assert!(out.success, "{}", out.text);
+                let tex = std::fs::read_to_string(build.join(TEX_FILE)).unwrap();
+                let json: Value = serde_json::from_slice(&std::fs::read(build.join(META_JSON)).unwrap()).unwrap();
+                (tex, json.get(review::METADATA_KEY).cloned())
+            }
+        };
+        let (tex, flag) = main(true).await;
+        assert!(tex.contains(review::PREAMBLE) && tex.find(review::PREAMBLE) < tex.find("\\begin{document}"), "{tex}");
+        assert_eq!(flag, Some(json!(true)));
+        let (tex, flag) = main(false).await;
+        assert!(!tex.contains("pfcomment") && flag.is_none(), "{tex}");
+    }
+
+    #[tokio::test]
+    async fn review_metadata_renders_comments_in_the_abstract() {
+        let tc = dev_toolchain();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        project::create(dir, None, "article", "", "").unwrap();
+        let meta = PaperMeta {
+            abstract_text: "An [abstract]{.comment author=\"Ada\" text=\"Too long\"} here.".into(),
+            ..project::read_meta(dir).unwrap()
+        };
+        let frags = fragments(&meta.parts);
+        for review in [false, true] {
+            let build = review::build_dir(&project::build_dir(dir), review);
+            std::fs::create_dir_all(&build).unwrap();
+            let out = convert_main(&tc, dir, &build, &meta, &frags, None, review, "test").await.unwrap();
+            assert!(out.success, "{}", out.text);
+            let tex = std::fs::read_to_string(build.join(TEX_FILE)).unwrap();
+            let expected = if review { "An \\pfcommenthl{abstract}\\pfcommentnote{Ada}{Too long} here." } else { "An abstract here." };
+            assert!(tex.contains(expected), "{expected} in\n{tex}");
+        }
     }
 
     /// The fragment without its `%PF:N` lines and the blank line Pandoc puts after each.
@@ -2044,7 +2211,7 @@ on two lines.
     async fn block_markers_only_add_comment_lines() {
         let marked = markers::mark_blocks(EVERY_BLOCK);
         for chapters in [false, true] {
-            let options = FragmentOptions { chapters, numeric_only: false };
+            let options = FragmentOptions { chapters, numeric_only: false, review: false };
             let plain = fragment_tex(EVERY_BLOCK, options).await;
             let with_markers = fragment_tex(&marked.text, options).await;
             assert_eq!(without_markers(&with_markers), plain.trim_end(), "chapters: {chapters}");
@@ -2055,7 +2222,7 @@ on two lines.
             assert_eq!(comments, marked.lines);
         }
 
-        let tex = fragment_tex(&marked.text, FragmentOptions { chapters: false, numeric_only: false }).await;
+        let tex = fragment_tex(&marked.text, FragmentOptions { chapters: false, numeric_only: false, review: false }).await;
         let map = BlockMap::new(&tex, EVERY_BLOCK);
         let md: Vec<&str> = EVERY_BLOCK.lines().collect();
         let tex_lines: Vec<&str> = tex.lines().collect();

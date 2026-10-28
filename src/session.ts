@@ -298,25 +298,34 @@ useStore.subscribe((s, prev) => {
 
 export function scheduleCompile(mode: CompileMode, delay: number) {
   clearTimeout(compileTimer);
-  compileTimer = setTimeout(() => void runCompile(mode, 0, compileFocus(mode)), delay);
+  compileTimer = setTimeout(() => void runCompile(mode, 0, compileFocus(mode), store.get().reviewMode), delay);
 }
 
-/** Saves pending edits and runs a full compile; resolves with whether a fresh PDF exists. */
-export async function compileNow(mode: CompileMode = "full"): Promise<boolean> {
+/**
+ * Saves pending edits and runs a full compile; resolves with whether a fresh PDF exists. `review`
+ * defaults to the preview's mode; a compile in the other mode leaves the preview's PDF alone.
+ */
+export async function compileNow(mode: CompileMode = "full", review = store.get().reviewMode): Promise<boolean> {
   clearTimeout(compileTimer);
   await flushSaves();
-  return runCompile(mode, 0, compileFocus(mode));
+  return runCompile(mode, 0, compileFocus(mode), review);
 }
 
-async function runCompile(mode: CompileMode, rerun: number, focus: string | null): Promise<boolean> {
+/** Shows the review PDF (comments rendered) in the preview, or the final one again. */
+export function setReviewMode(reviewMode: boolean) {
+  store.set({ reviewMode });
+  scheduleCompile("preview", 0);
+}
+
+async function runCompile(mode: CompileMode, rerun: number, focus: string | null, review: boolean): Promise<boolean> {
   const dir = store.get().dir;
   if (!dir) return false;
   const seq = ++compileSeq;
   store.set((s) => ({ compile: { ...s.compile, state: "running" } }));
   try {
-    const out = await api.compile(dir, mode, focus);
+    const out = await api.compile(dir, mode, focus, review);
     if (seq !== compileSeq || out.cancelled) return false;
-    if (out.ok && out.pdfPath) {
+    if (out.ok && out.pdfPath && review === store.get().reviewMode) {
       const bytes = new Uint8Array(await api.readBinary(out.pdfPath));
       if (seq !== compileSeq) return false;
       store.set((s) => ({ pdf: { data: bytes, version: (s.pdf?.version ?? 0) + 1 } }));
@@ -334,7 +343,7 @@ async function runCompile(mode: CompileMode, rerun: number, focus: string | null
     }));
     if (store.get().activeFile === TEX_FILE) void refreshTex();
     if (out.ok && out.needsRerun && rerun + 1 < MAX_RERUNS) {
-      return runCompile("preview", rerun + 1, focus);
+      return runCompile("preview", rerun + 1, focus, review);
     }
     return out.ok;
   } catch (e) {

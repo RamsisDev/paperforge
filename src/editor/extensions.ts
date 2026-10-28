@@ -42,6 +42,7 @@ import { levelInChapter } from "@/lib/outline";
 import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
+import { comments } from "./comments";
 import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs";
 import { grammarCheck } from "./grammar";
 import { spellCheck } from "./spell";
@@ -379,6 +380,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     grammarCheck,
     editorModeExtension(),
     showLatex,
+    comments,
     onChange,
   ];
 }

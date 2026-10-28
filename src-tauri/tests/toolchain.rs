@@ -54,7 +54,7 @@ fn update_meta(dir: &Path, edit: impl FnOnce(&mut project::PaperMeta)) {
 }
 
 async fn compile(dir: &Path, mode: CompileMode, focus: Option<&str>) -> CompileOutcome {
-    compiler::compile(&toolchain(), dir, mode, focus).await.unwrap()
+    compiler::compile(&toolchain(), dir, mode, focus, false).await.unwrap()
 }
 
 fn errors(outcome: &CompileOutcome) -> Vec<&compiler::Diagnostic> {
@@ -311,7 +311,7 @@ async fn aborted_compile_kills_tex_and_leaves_a_usable_build() {
 
     let dir = tmp.path().to_path_buf();
     let tc2 = tc.clone();
-    let task = tokio::spawn(async move { compiler::compile(&tc2, &dir, CompileMode::Full, None).await });
+    let task = tokio::spawn(async move { compiler::compile(&tc2, &dir, CompileMode::Full, None, false).await });
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
@@ -609,15 +609,79 @@ async fn synctex_links_markdown_lines_and_pdf_spots_both_ways() {
         for (part, text) in [(INTRO, "Cite with"), (METHOD, "Inline math works"), (METHOD, "Raw LaTeX passes")] {
             let markdown = std::fs::read_to_string(tmp.path().join(part)).unwrap();
             let line = markdown.lines().position(|l| l.contains(text)).unwrap() + 1;
-            let spot = backend.synctex_to_pdf(dir, part, line).await.unwrap();
+            let spot = backend.synctex_to_pdf(dir, part, line, false).await.unwrap();
             let spot = spot.unwrap_or_else(|| panic!("{template}: no PDF spot for {part}:{line}"));
             assert!(spot.page >= 1 && spot.height > 0.0, "{template}: {spot:?}");
-            let back = backend.synctex_to_source(dir, spot.page, spot.x + 2.0, spot.y + spot.height / 2.0).await;
+            let back = backend.synctex_to_source(dir, spot.page, spot.x + 2.0, spot.y + spot.height / 2.0, false).await;
             let back = back.unwrap().unwrap_or_else(|| panic!("{template}: no source at {spot:?}"));
             assert_eq!((back.part.as_str(), back.line), (part, line), "{template}: {text} at {spot:?}");
         }
         // The title block comes from the metadata, not from a part.
-        let title = backend.synctex_to_source(dir, 1, 300.0, 5.0).await.unwrap();
+        let title = backend.synctex_to_source(dir, 1, 300.0, 5.0, false).await.unwrap();
         assert_eq!(title, None, "{template}");
+    }
+}
+
+/// Comments over plain words, a citation, inline math, a table cell, a figure caption and a
+/// footnote: the final PDF drops them, the review PDF (in its own build directory) highlights
+/// them with a note, and neither needs a package or font outside the cache. The report gets
+/// margins wide enough for margin notes; the others print their notes inline.
+#[tokio::test]
+#[ignore = "runs the TeX toolchain"]
+async fn comments_compile_in_the_final_and_the_review_pdf() {
+    let comment = |text: &str, body: &str| {
+        format!("[{text}]{{.comment author=\"Ada L.\" date=\"2026-10-28T13:00\" text=\"{body}\"}}")
+    };
+    for template in ["article", "ieee", "report"] {
+        let tmp = sample_project(template, "");
+        if template == "report" {
+            update_meta(tmp.path(), |m| (m.layout.margins.left, m.layout.margins.right) = (4.0, 4.0));
+        }
+        edit_part(tmp.path(), INTRO, |c| {
+            c.replace("[@knuth1984; @lamport1994]", &comment("[@knuth1984; @lamport1994]", "Cite \\\"both\\\"? 100% & {more}"))
+                .replace("information can be measured", &comment("information can be *measured*", "Define it"))
+                + "\nA claim.^[A footnote with a "
+                + &comment("comment", "In a note")
+                + ".]\n"
+        });
+        edit_part(tmp.path(), METHOD, |c| {
+            c.replace("$H(X) \\ge 0$", &comment("$H(X) \\ge 0$", "Prove it"))
+                .replace("A sample figure.", &comment("A sample figure.", "Better caption"))
+                .replace("| Baseline |", &format!("| {} |", comment("Baseline", "Which one?")))
+        });
+
+        let review = compiler::compile(&toolchain(), tmp.path(), CompileMode::Full, None, true).await.unwrap();
+        assert!(review.ok, "{template} review: {:#?}", errors(&review));
+        assert!(!review.used_network, "{template}: the review PDF only uses cached packages and fonts");
+        assert!(undefined(&review).is_empty(), "{template} review: {:#?}", undefined(&review));
+        let review_build = paperforge_lib::review::build_dir(&project::build_dir(tmp.path()), true);
+        assert_eq!(review.pdf_path.as_deref(), review_build.join("paper.pdf").to_str());
+        let intro = std::fs::read_to_string(review_build.join("part-sections-introduction.tex")).unwrap();
+        assert!(intro.contains("\\pfcommentbox{\\citep{knuth1984, lamport1994}}\\pfcommentnote{Ada L.}"), "{intro}");
+        let method = std::fs::read_to_string(review_build.join("part-sections-method.tex")).unwrap();
+        assert!(method.contains("\\pfcommentbox{\\(H(X) \\ge 0\\)}\\pfcommentnote{Ada L.}{Prove it}"), "{method}");
+
+        let outcome = compile(tmp.path(), CompileMode::Full, None).await;
+        assert!(outcome.ok, "{template}: {:#?}", errors(&outcome));
+        assert!(!outcome.used_network && outcome.converted_parts == 3, "{template}");
+        assert!(undefined(&outcome).is_empty(), "{template}: {:#?}", undefined(&outcome));
+        for part in ["part-sections-introduction.tex", "part-sections-method.tex"] {
+            let tex = std::fs::read_to_string(project::build_dir(tmp.path()).join(part)).unwrap();
+            assert!(!tex.contains("pfcomment") && !tex.contains("Which one"), "{template} {part}:\n{tex}");
+        }
+        assert!(!main_tex(tmp.path()).contains("pfcomment"));
+
+        let again = compiler::compile(&toolchain(), tmp.path(), CompileMode::Preview, None, true).await.unwrap();
+        assert!(again.ok && again.converted_parts == 0, "{template}: the final build left the review build alone");
+
+        let backend = Backend::new(toolchain(), None, manifest().join("resources/sample"));
+        let dir = tmp.path().to_str().unwrap();
+        let markdown = std::fs::read_to_string(tmp.path().join(METHOD)).unwrap();
+        let line = markdown.lines().position(|l| l.contains("Inline math")).unwrap() + 1;
+        let spot = backend.synctex_to_pdf(dir, METHOD, line, true).await.unwrap();
+        let spot = spot.unwrap_or_else(|| panic!("{template}: no review SyncTeX spot for {METHOD}:{line}"));
+        let back = backend.synctex_to_source(dir, spot.page, spot.x + 2.0, spot.y + spot.height / 2.0, true).await.unwrap();
+        assert_eq!(back.map(|s| (s.part, s.line)), Some((METHOD.to_string(), line)), "{template}: review SyncTeX");
+        println!("{template:<8} review tex {:>5} ms   final tex {:>5} ms", review.tex_ms, outcome.tex_ms);
     }
 }

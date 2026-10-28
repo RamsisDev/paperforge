@@ -101,6 +101,21 @@ function inlineMathEnd(text: string, start: number): number {
   return -1;
 }
 
+/** Index of the `}` closing the attributes opened at `start`, past quoted values; -1 past the line. */
+function attributesEnd(text: string, start: number): number {
+  let quote = "";
+  for (let i = start + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\n") return -1;
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = "";
+    } else if ((c === '"' || c === "'") && text[i - 1] === "=") quote = c;
+    else if (c === "}") return i;
+  }
+  return -1;
+}
+
 function displayMathEnd(text: string, start: number): number {
   for (let i = start + 2; i < text.length - 1; i++) {
     if (text[i] === "\\") i++;
@@ -210,9 +225,8 @@ export function scanInline(text: string, base = 0): InlineToken[] {
       }
     }
     if (c === "{" && (text[i + 1] === "#" || text[i + 1] === ".")) {
-      const end = text.indexOf("}", i);
-      const nl = text.indexOf("\n", i);
-      if (end > 0 && (nl < 0 || end < nl)) {
+      const end = attributesEnd(text, i);
+      if (end > 0) {
         tokens.push({ kind: "attr", attrs: parseAttributes(text.slice(i + 1, end)), from: base + i, to: base + end + 1 });
         i = end + 1;
         continue;

@@ -170,6 +170,7 @@ export function Preview() {
   const linesCache = useRef<{ version: number; lines: Promise<TextLine[]>[] } | null>(null);
   const chapters = useStore((s) => usesChapters(s.meta?.template));
   const previewFocus = useStore((s) => s.previewFocus);
+  const reviewMode = useStore((s) => s.reviewMode);
 
   useEffect(() => localStorage.setItem("paperforge.zoom", String(zoom)), [zoom]);
 
@@ -262,11 +263,11 @@ export function Preview() {
       text += ` ${next.textContent ?? ""}`;
     }
     const clicked = window.getSelection()?.toString();
-    const { dir } = store.get();
+    const { dir, reviewMode } = store.get();
     if (page && dir) {
       const box = page.getBoundingClientRect();
       const spot = await api
-        .synctexToSource(dir, Number(page.dataset.page) + 1, (e.clientX - box.left) / scale, (e.clientY - box.top) / scale)
+        .synctexToSource(dir, Number(page.dataset.page) + 1, (e.clientX - box.left) / scale, (e.clientY - box.top) / scale, reviewMode)
         .catch(() => null);
       if (spot && store.get().parts.some((p) => p.file === spot.part)) return jumpTo(spot.part, spot.line - 1);
     }
@@ -321,10 +322,10 @@ export function Preview() {
   // Cursor -> PDF: SyncTeX knows where the line was typeset; without its data, match the text.
   async function revealCursor() {
     const view = editorBridge.view;
-    const { activeFile, dir } = store.get();
+    const { activeFile, dir, reviewMode } = store.get();
     if (!view || !isPartFile(activeFile)) return;
     const line = view.state.doc.lineAt(view.state.selection.main.head);
-    const spot = dir ? await api.synctexToPdf(dir, activeFile, line.number).catch(() => null) : null;
+    const spot = dir ? await api.synctexToPdf(dir, activeFile, line.number, reviewMode).catch(() => null) : null;
     if (spot && doc && spot.page <= doc.sizes.length) {
       flash(spot.page - 1, spot.y, spot.height, Date.now());
     } else {
@@ -339,6 +340,11 @@ export function Preview() {
         <span className="px-1 text-xs tabular-nums text-muted">
           {doc ? `Page ${currentPage} of ${doc.sizes.length}` : "Preview"}
         </span>
+        {reviewMode && (
+          <span className="rounded bg-accent-soft px-1.5 py-px text-[11px] font-medium text-accent" title="Comments are rendered in this PDF">
+            Review PDF
+          </span>
+        )}
         {compileState === "running" && <LoaderCircle size={14} className="animate-spin text-accent" aria-label="Compiling" />}
         <div className="flex-1" />
         {chapters && (

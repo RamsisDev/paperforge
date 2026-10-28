@@ -1,0 +1,43 @@
+:root {
+  --pf-comment-bg: rgba(250, 204, 21, 0.28);
+  --pf-comment-line: #ca8a04;
+}
+
+.dark {
+  --pf-comment-bg: rgba(250, 204, 21, 0.18);
+  --pf-comment-line: #facc15;
+}
+
+.pf-comment {
+  background: var(--pf-comment-bg);
+  border-bottom: 1.5px solid var(--pf-comment-line);
+  border-radius: 2px;
+}
+
+/* The grammar reads `[text]` as a link; in Writing mode the commented text keeps the prose color. */
+.pf-writing .pf-comment,
+.pf-writing .pf-comment > span:not(.pf-lp-chip):not(.pf-lp-math) {
+  color: var(--pf-fg);
+}
+
+.pf-comment.pf-comment-resolved {
+  background: transparent;
+  border-bottom: 1px dashed var(--pf-faint);
+}
+
+.pf-comment-marker {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 2px;
+  padding: 0 3px;
+  vertical-align: 1px;
+  border-radius: 4px;
+  color: var(--pf-comment-line);
+  background: var(--pf-comment-bg);
+  cursor: pointer;
+}
+
+.pf-comment-marker.pf-comment-resolved {
+  color: var(--pf-faint);
+  background: transparent;
+}
