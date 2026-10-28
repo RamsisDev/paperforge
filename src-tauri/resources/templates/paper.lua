@@ -6,6 +6,8 @@
 --   tables                    -> table float + tabular (longtable breaks two-column classes)
 --   <!--pf:N--> block markers -> %PF:N comment lines (Markdown line N starts the next block)
 --   ::: {.x} / [..]{.x}       -> \begin{pf-x}...\end{pf-x} / \pfstylex{...} for project styles
+--   [..]{.comment …}          -> review markup: highlighted with a note in the review PDF
+--                                (`pf-review` metadata), the bare text in the final one
 
 local REF_PREFIXES = { fig = true, tbl = true, eq = true, sec = true }
 
@@ -40,8 +42,12 @@ local function style_command(name)
   return "\\pfstyle" .. encoded
 end
 
+-- Set from `pf-review` metadata: the review PDF renders review markup, the final PDF strips it.
+local review = false
+
 local function read_meta(meta)
   numeric_only = meta["numeric-only-citations"] == true
+  review = meta["pf-review"] == true
   local spec = meta["pf-styles"]
   if spec then
     for kind, name in pandoc.utils.stringify(spec):gmatch("(%a+):([%w%-]+)") do
@@ -277,7 +283,132 @@ local function Div(el)
   return blocks
 end
 
+-- Review markup ------------------------------------------------------------------------------
+
+local PLAIN_INLINES = { Str = true, Space = true, SoftBreak = true }
+local SPACE_INLINES = { Space = true, SoftBreak = true }
+-- Formatting kept around its marked content.
+local WRAPPER_INLINES = {
+  Emph = true, Strong = true, Underline = true, SmallCaps = true, Strikeout = true,
+  Superscript = true, Subscript = true, Quoted = true, Span = true,
+}
+
+-- Line breaks stay where the Markdown has them, as in the fragment, so lines keep mapping back.
+local REVIEW_OPTIONS = { cite_method = PANDOC_WRITER_OPTIONS.cite_method, wrap_text = "wrap-preserve" }
+
+local function review_latex(inlines)
+  local out = pandoc.write(pandoc.Pandoc({ pandoc.Plain(inlines) }), "latex", REVIEW_OPTIONS)
+  return (out:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- The LaTeX of review markup already rendered, so an enclosing span does not mark it again.
+local rendered = {}
+
+local function rendered_latex(text)
+  rendered[text] = true
+  return pandoc.RawInline("latex", text)
+end
+
+-- Words whose LaTeX is a command or a group (`\%`, `\textbackslash{}`, `~`) are not plain for
+-- soul, which reads its argument token by token.
+local function soul_safe(str)
+  return not review_latex({ str }):find("[\\{}~$^]")
+end
+
+-- Marks inlines for the review PDF. Runs of plain words go through `text_cmd` (built on soul's
+-- `\hl`, which breaks lines but fails on math, citations and most commands); every other inline
+-- goes through `box_cmd` (an unbreakable box); formatting stays around its marked content and
+-- footnotes stay unmarked, since a box would swallow them. Spaces at the edges of a run stay
+-- outside it.
+local function review_mark(inlines, text_cmd, box_cmd)
+  local out = pandoc.List()
+  local run = pandoc.List()
+  local function flush()
+    while #run > 0 and SPACE_INLINES[run[1].t] do
+      out:insert(run:remove(1))
+    end
+    local trailing = pandoc.List()
+    while #run > 0 and SPACE_INLINES[run[#run].t] do
+      trailing:insert(1, run:remove())
+    end
+    if #run > 0 then
+      out:insert(rendered_latex(text_cmd .. "{" .. review_latex(run) .. "}"))
+    end
+    out:extend(trailing)
+    run = pandoc.List()
+  end
+  for _, el in ipairs(inlines) do
+    if PLAIN_INLINES[el.t] and (el.t ~= "Str" or soul_safe(el)) then
+      run:insert(el)
+    else
+      flush()
+      if WRAPPER_INLINES[el.t] then
+        el.content = review_mark(el.content, text_cmd, box_cmd)
+        out:insert(el)
+      elseif el.t == "Note" or (el.t == "RawInline" and rendered[el.text]) then
+        out:insert(el)
+      else
+        out:insert(rendered_latex(box_cmd .. "{" .. review_latex({ el }) .. "}"))
+      end
+    end
+  end
+  flush()
+  return out
+end
+
+-- An attribute as literal LaTeX text.
+local function attribute_latex(el, key)
+  return review_latex(pandoc.Inlines(el.attributes[key] or ""))
+end
+
+local function unwrap(el)
+  return el.content
+end
+
+-- Set on comments whose note cannot go into the margin: `\marginpar` fails in footnotes, floats
+-- and table cells, and a heading would repeat it in the table of contents.
+local INLINE_NOTE = "pf-inline-note"
+
+local function mark_inline_notes(el)
+  return el:walk({
+    Span = function(span)
+      if span.classes:includes("comment") then
+        span.attributes[INLINE_NOTE] = "true"
+        return span
+      end
+    end,
+  })
+end
+
+local function review_comment(el)
+  if el.attributes.resolved == "true" then
+    return el.content
+  end
+  local note = el.attributes[INLINE_NOTE] and "\\pfcommentinline" or "\\pfcommentnote"
+  local out = review_mark(el.content, "\\pfcommenthl", "\\pfcommentbox")
+  out:insert(rendered_latex(note .. "{" .. attribute_latex(el, "author") .. "}{" .. attribute_latex(el, "text") .. "}"))
+  return out
+end
+
+-- Span classes of review markup: `review` renders a span in the review PDF and `final` in the
+-- final one, both returning inlines. The LaTeX commands they emit are defined in `review.rs`.
+local REVIEW_SPANS = {
+  comment = { review = review_comment, final = unwrap },
+}
+
+local function review_kind(el)
+  for _, class in ipairs(el.classes) do
+    if REVIEW_SPANS[class] then
+      return REVIEW_SPANS[class]
+    end
+  end
+end
+
 local function Span(el)
+  local kind = review_kind(el)
+  if kind then
+    return review and kind.review(el) or kind.final(el)
+  end
   local styled, inner = split_styles(el, span_styles)
   if not styled then
     return nil
@@ -307,6 +438,15 @@ local function styled_element(class)
   end
 end
 
+local function prepare_review(doc)
+  if not review then
+    return nil
+  end
+  return doc:walk({
+    Note = mark_inline_notes, Figure = mark_inline_notes, Table = mark_inline_notes, Header = mark_inline_notes,
+  })
+end
+
 local function RawBlock(el)
   if el.format ~= "html" then
     return nil
@@ -319,6 +459,7 @@ end
 
 return {
   { Meta = read_meta, Pandoc = scope_headings_to_file },
+  { Pandoc = prepare_review },
   { Cite = Cite, Para = Para, Figure = Figure, Table = Table, RawBlock = RawBlock, Div = Div, Span = Span,
     SmallCaps = styled_element("smallcaps"), Underline = styled_element("underline") },
 }

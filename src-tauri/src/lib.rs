@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod layout;
 pub mod markers;
 pub mod project;
+pub mod review;
 pub mod showlatex;
 pub mod styles;
 pub mod synctex;
@@ -117,13 +118,14 @@ async fn compile(
     dir: String,
     mode: CompileMode,
     focus: Option<String>,
+    review: Option<bool>,
 ) -> Result<CompileOutcome, String> {
-    state.compile(dir, mode, focus).await
+    state.compile(dir, mode, focus, review.unwrap_or(false)).await
 }
 
 #[tauri::command]
-async fn export_pdf(dir: String, dest: String) -> Result<(), String> {
-    let pdf = project::build_dir(Path::new(&dir)).join("paper.pdf");
+async fn export_pdf(dir: String, dest: String, review: Option<bool>) -> Result<(), String> {
+    let pdf = review::build_dir(&project::build_dir(Path::new(&dir)), review.unwrap_or(false)).join("paper.pdf");
     tokio::fs::copy(&pdf, &dest).await.map(|_| ()).map_err(|e| format!("{dest}: {e}"))
 }
 
@@ -141,13 +143,20 @@ async fn synctex_to_source(
     page: u32,
     x: f64,
     y: f64,
+    review: Option<bool>,
 ) -> Result<Option<SourceSpot>, String> {
-    state.synctex_to_source(&dir, page, x, y).await
+    state.synctex_to_source(&dir, page, x, y, review.unwrap_or(false)).await
 }
 
 #[tauri::command]
-async fn synctex_to_pdf(state: State<'_, Backend>, dir: String, part: String, line: usize) -> Result<Option<PdfBox>, String> {
-    state.synctex_to_pdf(&dir, &part, line).await
+async fn synctex_to_pdf(
+    state: State<'_, Backend>,
+    dir: String,
+    part: String,
+    line: usize,
+    review: Option<bool>,
+) -> Result<Option<PdfBox>, String> {
+    state.synctex_to_pdf(&dir, &part, line, review.unwrap_or(false)).await
 }
 
 #[tauri::command]
