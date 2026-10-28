@@ -1,9 +1,10 @@
-import { Plus, X } from "lucide-react";
+import { FileCog, PackageOpen, Plus, Undo2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Author } from "@/lib/api";
 import { LANGUAGES, templateInfo, usesChapters } from "@/lib/templates";
-import { updateMeta } from "@/session";
+import { ejectTemplate, openPreamble, restoreTemplate, updateMeta } from "@/session";
 import { useStore } from "@/store";
+import { notify } from "../Toaster";
 import { Button, Checkbox, Field, Input, Select, Textarea, cx } from "../ui";
 
 const DEPTH_LABELS = {
@@ -171,6 +172,104 @@ export function PaperPanel() {
           onChange={(e) => updateMeta({ bibStyle: e.target.value })}
         />
       </Field>
+
+      <LatexSettings />
     </div>
+  );
+}
+
+function run(task: () => Promise<unknown>) {
+  task().catch((e) => notify(String(e), "error"));
+}
+
+/** Class options, the project preamble and the template file: LaTeX for those who want it. */
+function LatexSettings() {
+  const meta = useStore((s) => s.meta)!;
+  const dir = useStore((s) => s.dir);
+  const hasPreamble = useStore((s) => s.preamble !== null);
+  const [classOptions, setClassOptions] = useState("");
+  const [confirmEject, setConfirmEject] = useState(false);
+
+  // Seeded once per project, like the keywords.
+  useEffect(() => setClassOptions((meta.classOptions ?? []).join(", ")), [dir]);
+
+  const templateFile = meta.templateFile ?? "";
+  const label = templateInfo(meta.template).label;
+  return (
+    <section aria-labelledby="pf-latex-heading" className="space-y-3">
+      <h3 id="pf-latex-heading" className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+        LaTeX
+      </h3>
+      <Field label="Class options" hint="Comma separated">
+        <Input
+          value={classOptions}
+          className="font-mono text-xs"
+          placeholder="twocolumn, 10pt"
+          onChange={(e) => {
+            setClassOptions(e.target.value);
+            updateMeta({ classOptions: e.target.value.split(",").map((o) => o.trim()).filter(Boolean) });
+          }}
+        />
+      </Field>
+      <p className="-mt-1.5 text-[11px] leading-snug text-faint">
+        An option replaces the template's own of the same kind: 10pt replaces 11pt, letterpaper replaces a4paper.
+      </p>
+
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[12px] text-muted">Preamble</span>
+        <Button size="sm" onClick={openPreamble}>
+          <FileCog size={13} /> {hasPreamble ? "Edit preamble.tex" : "Create preamble.tex"}
+        </Button>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[12px] text-muted">Template</span>
+          {templateFile ? (
+            <Button size="sm" onClick={() => run(restoreTemplate)}>
+              <Undo2 size={13} /> Restore built-in template
+            </Button>
+          ) : (
+            <Button size="sm" disabled={confirmEject} onClick={() => setConfirmEject(true)}>
+              <PackageOpen size={13} /> Eject template…
+            </Button>
+          )}
+        </div>
+        {templateFile ? (
+          <p className="text-[11px] leading-snug text-faint">
+            Typesetting with <code className="font-mono">{templateFile}</code>, your copy of {label}. Restoring keeps the copy
+            on disk.
+          </p>
+        ) : (
+          confirmEject && (
+            <div
+              ref={(el) => el?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+              role="alertdialog"
+              aria-label="Eject template"
+              className="space-y-2 rounded-lg border border-line bg-raised/50 p-2.5">
+              <p className="text-[12px] leading-snug text-muted">
+                Copy the {label} template into this project's <code className="font-mono">template/</code> folder and
+                typeset with that copy, so you can edit it. Later improvements to the built-in template will not reach it.
+              </p>
+              <div className="flex justify-end gap-1.5">
+                <Button size="sm" variant="ghost" onClick={() => setConfirmEject(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={() => {
+                    setConfirmEject(false);
+                    run(ejectTemplate);
+                  }}
+                >
+                  Eject
+                </Button>
+              </div>
+            </div>
+          )
+        )}
+      </div>
+    </section>
   );
 }

@@ -52,6 +52,7 @@ function stubTauri(fixture) {
     parts: state.parts.map((p) => ({ ...p })),
     bib: state.bib,
     figures: state.figures,
+    preamble: state.preamble ?? null,
   });
   const indexOf = (file) => {
     const i = state.parts.findIndex((p) => p.file === file);
@@ -178,6 +179,15 @@ function stubTauri(fixture) {
         case "dictionary_add":
           state.dictionary = [...new Set([...(state.dictionary ?? []), ...args.words])];
           return state.dictionary;
+        case "preamble_save":
+          state.preamble = args.content;
+          return null;
+        case "template_eject":
+          state.meta = { ...state.meta, templateFile: `template/${state.meta.template}.tex` };
+          return snapshot();
+        case "template_restore":
+          state.meta = { ...state.meta, templateFile: "" };
+          return snapshot();
         default:
           return null;
       }
@@ -331,6 +341,10 @@ await page.keyboard.type("\n\n/to");
 await page.waitForSelector(".cm-tooltip-autocomplete", { timeout: 5000 });
 await shot("13-slash-toc");
 await page.keyboard.press("Escape");
+await page.keyboard.type("\n\nA claim");
+await page.getByRole("button", { name: "Footnote" }).click();
+await settle(150);
+console.log("footnote button:", await page.locator(".cm-activeLine").first().textContent());
 
 // KaTeX hover, in the method chapter.
 await page.locator("li.group").nth(1).click();
@@ -514,6 +528,29 @@ await typo().waitFor({ state: "detached", timeout: 5000 });
 console.log(
   "after adding to the project dictionary:",
   JSON.stringify(await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "dictionary_add").map((c) => c.args.words))),
+);
+
+// LaTeX settings: preamble.tex opens as an editor tab and saves; the template ejects and restores.
+await page.getByRole("tab", { name: "Paper", exact: true }).click();
+await page.getByRole("button", { name: "Create preamble.tex" }).click();
+await settle(200);
+await page.click(".cm-content");
+await page.keyboard.press("ControlOrMeta+End");
+await page.keyboard.type("\\newcommand\\pf{PaperForge}\n");
+await settle(700);
+const preambleSaves = await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd === "preamble_save").map((c) => c.args.content));
+console.log("preamble tab:", await editorTab(), "· last save:", JSON.stringify(preambleSaves.at(-1)));
+await page.getByRole("button", { name: "Eject template…" }).click();
+await settle(500);
+await shot("22b-eject-confirm");
+await page.getByRole("alertdialog", { name: "Eject template" }).getByRole("button", { name: "Eject" }).click();
+await page.getByRole("button", { name: "Restore built-in template" }).waitFor({ timeout: 5000 });
+await shot("22c-ejected");
+await page.getByRole("button", { name: "Restore built-in template" }).click();
+await page.getByRole("button", { name: "Eject template…" }).waitFor({ timeout: 5000 });
+console.log(
+  "template commands:",
+  (await page.evaluate(() => window.__pfCalls.filter((c) => c.cmd.startsWith("template_")).map((c) => c.cmd))).join(", "),
 );
 
 // Typing cost: main-thread time per keystroke (CodeMirror update + save scheduling + React),

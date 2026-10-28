@@ -385,3 +385,8 @@ export function bibExtensions(onChange: Extension): Extension[] {
 export function texExtensions(): Extension[] {
   return [...base(), EditorState.readOnly.of(true), markRegex(/\\[a-zA-Z@]+/g, "pf-attr"), markRegex(/\$[^$\n]+\$/g, "pf-math")];
 }
+
+/** Hand-written LaTeX, such as the project's preamble.tex. */
+export function latexSourceExtensions(onChange: Extension): Extension[] {
+  return [...base(), markRegex(/\\[a-zA-Z@]+/g, "pf-attr"), markRegex(/\$[^$\n]+\$/g, "pf-math"), onChange];
+}

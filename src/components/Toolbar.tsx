@@ -1,4 +1,5 @@
 import {
+  Asterisk,
   Bold,
   BookOpen,
   ChevronDown,
@@ -67,6 +68,7 @@ const GROUPS: { action: Action; label: string; icon: ReactNode; shortcut?: strin
     { action: "math", label: "Inline math", icon: <Sigma size={15} />, shortcut: `${MOD}M` },
     { action: "equation", label: "Numbered equation", icon: <SquareFunction size={15} />, shortcut: `${MOD}${SHIFT}M` },
     { action: "citation", label: "Citation", icon: <BookOpen size={15} />, shortcut: `${MOD}${SHIFT}C` },
+    { action: "footnote", label: "Footnote", icon: <Asterisk size={15} /> },
     { action: "figure", label: "Figure", icon: <Image size={15} /> },
     { action: "table", label: "Table", icon: <Table size={15} /> },
   ],

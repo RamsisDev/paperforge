@@ -10,7 +10,17 @@
 import { setWindowTitle } from "@/lib/platform";
 import { api, baseName, type CompileMode, type PaperMeta, type Part, type ProjectSnapshot } from "@/lib/api";
 import { usesChapters } from "@/lib/templates";
-import { BIB_FILE, TEX_FILE, initialProjectState, isPartFile, store, useStore, type EditorFile } from "@/store";
+import {
+  BIB_FILE,
+  PREAMBLE_FILE,
+  TEX_FILE,
+  initialProjectState,
+  isPartFile,
+  openFile,
+  store,
+  useStore,
+  type EditorFile,
+} from "@/store";
 import { rememberProject } from "@/lib/recent";
 
 const SAVE_DELAY_MS = 300;
@@ -20,7 +30,8 @@ const MAX_RERUNS = 3;
 
 /** Parts edited since their last save; their current text is read from the store when written. */
 const pendingParts = new Set<string>();
-const pendingFields = new Set<"meta" | "bib">();
+const pendingFields = new Set<"meta" | "bib" | "preamble">();
+const PREAMBLE_STARTER = "% Added at the end of the LaTeX preamble: \\usepackage, \\newcommand, ...\n";
 /** Text of each part as the backend last stored it. */
 let lastSaved = new Map<string, string>();
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -50,6 +61,7 @@ export function loadProject(snapshot: ProjectSnapshot) {
     meta: snapshot.meta,
     parts: snapshot.parts,
     bib: snapshot.bib,
+    preamble: snapshot.preamble ?? null,
     figures: snapshot.figures,
     activeFile: snapshot.parts[0]?.file ?? BIB_FILE,
   });
@@ -72,7 +84,7 @@ function queueSave() {
 }
 
 async function writePending() {
-  const { dir, parts, meta, bib } = store.get();
+  const { dir, parts, meta, bib, preamble } = store.get();
   const files = [...pendingParts];
   const fields = [...pendingFields];
   pendingParts.clear();
@@ -92,13 +104,22 @@ async function writePending() {
       errors.push(String(e));
     }
   });
-  if (fields.length) {
+  if (fields.includes("meta") || fields.includes("bib")) {
     const update: { meta?: PaperMeta; bib?: string } = {};
     if (fields.includes("meta") && meta) update.meta = meta;
     if (fields.includes("bib")) update.bib = bib;
     writes.push(
       api.save(dir, update).catch((e) => {
-        fields.forEach((f) => pendingFields.add(f));
+        if (update.meta) pendingFields.add("meta");
+        if (update.bib !== undefined) pendingFields.add("bib");
+        errors.push(String(e));
+      }),
+    );
+  }
+  if (fields.includes("preamble") && preamble !== null) {
+    writes.push(
+      api.savePreamble(dir, preamble).catch((e) => {
+        pendingFields.add("preamble");
         errors.push(String(e));
       }),
     );
@@ -126,6 +147,18 @@ export function setBib(bib: string) {
   store.set({ bib });
   pendingFields.add("bib");
   queueSave();
+}
+
+export function setPreamble(preamble: string) {
+  store.set({ preamble });
+  pendingFields.add("preamble");
+  queueSave();
+}
+
+/** Opens preamble.tex in the editor, creating it first when the project has none. */
+export function openPreamble() {
+  if (store.get().preamble === null) setPreamble(PREAMBLE_STARTER);
+  openFile(PREAMBLE_FILE);
 }
 
 export function updateMeta(patch: Partial<PaperMeta>) {
@@ -162,10 +195,12 @@ function applySnapshot(snapshot: ProjectSnapshot, preferredFile?: EditorFile) {
 
   const keep = (file: EditorFile | undefined) => file !== undefined && (!isPartFile(file) || files.has(file));
   const activeFile = keep(preferredFile) ? preferredFile! : keep(s.activeFile) ? s.activeFile : (parts[0]?.file ?? BIB_FILE);
+  const { parts: partFiles, templateFile } = snapshot.meta;
   store.set({
-    meta: pendingFields.has("meta") && s.meta ? { ...s.meta, parts: snapshot.meta.parts } : snapshot.meta,
+    meta: pendingFields.has("meta") && s.meta ? { ...s.meta, parts: partFiles, templateFile } : snapshot.meta,
     parts,
     bib: pendingFields.has("bib") ? s.bib : snapshot.bib,
+    preamble: pendingFields.has("preamble") ? s.preamble : (snapshot.preamble ?? null),
     figures: snapshot.figures,
     activeFile,
     addingPart: null,
@@ -229,6 +264,14 @@ export function mergeWithNext(file: string) {
     (dir) => api.mergeParts(dir, [file, next.file]),
     () => (activeFile === next.file ? file : undefined),
   );
+}
+
+export function ejectTemplate() {
+  return restructure((dir) => api.ejectTemplate(dir));
+}
+
+export function restoreTemplate() {
+  return restructure((dir) => api.restoreTemplate(dir));
 }
 
 // Compiling ----------------------------------------------------------------------------------

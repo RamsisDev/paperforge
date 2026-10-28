@@ -4,15 +4,16 @@ import type { Diagnostic, PaperMeta, Part, TocEntry } from "@/lib/api";
 
 export const BIB_FILE = "refs.bib";
 export const TEX_FILE = "paper.tex";
+export const PREAMBLE_FILE = "preamble.tex";
 
-/** A Markdown part path, `BIB_FILE` or `TEX_FILE`. */
+/** A Markdown part path, `BIB_FILE`, `TEX_FILE` or `PREAMBLE_FILE`. */
 export type EditorFile = string;
 export type SidebarTab = "paper" | "structure" | "refs" | "figures" | "find";
 export type Theme = "light" | "dark";
 export type GalleryMode = "create" | "change";
 
 export function isPartFile(file: EditorFile): boolean {
-  return file !== BIB_FILE && file !== TEX_FILE;
+  return file !== BIB_FILE && file !== TEX_FILE && file !== PREAMBLE_FILE;
 }
 
 export interface CompileStatus {
@@ -44,6 +45,8 @@ interface State {
   parts: Part[];
   bib: string;
   tex: string;
+  /** `preamble.tex`, null while the project has none. */
+  preamble: string | null;
   figures: string[];
 
   activeFile: EditorFile;
@@ -82,6 +85,7 @@ export const initialProjectState = {
   parts: [] as Part[],
   bib: "",
   tex: "",
+  preamble: null,
   figures: [],
   activeFile: "" as EditorFile,
   saveState: "saved" as const,
