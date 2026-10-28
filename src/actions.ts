@@ -37,7 +37,7 @@ export async function exportPdf() {
   if (saved) notify(`Saved ${baseName(saved)}`);
 }
 
-/** The review PDF: comments highlighted with their notes. */
+/** The review PDF: comments highlighted with their notes, tracked changes marked. */
 export async function exportReviewPdf() {
   const { dir, meta } = store.get();
   if (!dir || !(await freshBuild(true))) return;

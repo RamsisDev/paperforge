@@ -20,6 +20,7 @@ import {
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { CommentBox } from "@/components/CommentBox";
+import { paragraphsAround, untracked } from "@/editor/changes/track";
 import { notify } from "@/components/Toaster";
 import { previewDecorations, registerInlineWidget } from "@/editor/livepreview";
 import { activeSpans, touchesActive } from "@/editor/livepreview/syntax";
@@ -37,23 +38,6 @@ import {
   type Comment,
 } from "./model";
 import "./comments.css";
-
-/** Lines searched for the blank line that bounds a paragraph. */
-const PARAGRAPH_LINES = 200;
-
-function isBlank(text: string) {
-  return /^\s*$/.test(text);
-}
-
-/** `from`..`to` grown to the paragraphs around it, the reach of a comment span. */
-function paragraphsAround(state: EditorState, from: number, to: number): { from: number; to: number } {
-  const doc = state.doc;
-  let first = doc.lineAt(from);
-  for (let n = 0; n < PARAGRAPH_LINES && first.number > 1 && !isBlank(first.text); n++) first = doc.line(first.number - 1);
-  let last = doc.lineAt(to);
-  for (let n = 0; n < PARAGRAPH_LINES && last.number < doc.lines && !isBlank(last.text); n++) last = doc.line(last.number + 1);
-  return { from: first.from, to: last.to };
-}
 
 function commentsBetween(state: EditorState, from: number, to: number): Comment[] {
   const range = paragraphsAround(state, from, to);
@@ -86,7 +70,7 @@ function boxView(view: EditorView, request: BoxRequest): TooltipView {
   const root = createRoot(dom);
   const comment = request.edit ? commentNear(view.state, request.from) : null;
   const finish = (changes: ReturnType<typeof wrapComment>) => {
-    view.dispatch({ changes, effects: openCommentBox.of(null), userEvent: "input.comment" });
+    view.dispatch({ changes, effects: openCommentBox.of(null), userEvent: "input.comment", annotations: untracked.of(true) });
     view.focus();
   };
   root.render(

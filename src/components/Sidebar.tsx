@@ -33,7 +33,7 @@ export function Sidebar() {
           { id: "refs", label: "Refs", icon: <BookOpen size={13} /> },
           { id: "figures", label: "Figures", icon: <Images size={13} /> },
           { id: "find", label: "Find", icon: <Search size={13} /> },
-          { id: "comments", label: "Comments", icon: <MessageSquare size={13} /> },
+          { id: "comments", label: "Review", icon: <MessageSquare size={13} /> },
         ]}
       />
       <div key={tab} className="min-h-0 flex-1 overflow-auto">

@@ -42,6 +42,7 @@ import { levelInChapter } from "@/lib/outline";
 import { usesChapters } from "@/lib/templates";
 import { store } from "@/store";
 import { SNIPPETS, formatting } from "./commands";
+import { trackChanges } from "./changes";
 import { comments } from "./comments";
 import { crossRefCompletions, labelOptions, refSlashCommand } from "./crossrefs";
 import { grammarCheck } from "./grammar";
@@ -381,6 +382,7 @@ export function markdownExtensions(onChange: Extension): Extension[] {
     editorModeExtension(),
     showLatex,
     comments,
+    trackChanges,
     onChange,
   ];
 }

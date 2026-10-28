@@ -341,7 +341,7 @@ export function Preview() {
           {doc ? `Page ${currentPage} of ${doc.sizes.length}` : "Preview"}
         </span>
         {reviewMode && (
-          <span className="rounded bg-accent-soft px-1.5 py-px text-[11px] font-medium text-accent" title="Comments are rendered in this PDF">
+          <span className="rounded bg-accent-soft px-1.5 py-px text-[11px] font-medium text-accent" title="Comments and tracked changes are rendered in this PDF">
             Review PDF
           </span>
         )}

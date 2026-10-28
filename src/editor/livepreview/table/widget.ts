@@ -3,6 +3,7 @@ import { syntaxTree } from "@codemirror/language";
 import type { EditorState } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
+import { untracked } from "@/editor/changes/track";
 import { labels } from "@/lib/outline";
 import { allText } from "@/lib/parts";
 import { refName } from "@/lib/refnames";
@@ -99,7 +100,7 @@ function writeLines(view: EditorView, base: number, before: string, after: strin
   if (park <= view.state.doc.length && (sel.anchor !== park || sel.head !== park)) {
     view.dispatch({ selection: { anchor: park }, userEvent: "select" });
   }
-  view.dispatch({ changes, userEvent: "input.table", annotations: isolateHistory.of("full") });
+  view.dispatch({ changes, userEvent: "input.table", annotations: [isolateHistory.of("full"), untracked.of(true)] });
   return true;
 }
 
