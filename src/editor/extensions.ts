@@ -47,6 +47,7 @@ import { spellCheck } from "./spell";
 import { figureTools } from "./figureInspector";
 import { markdownFolding } from "./folding";
 import { editorModeExtension } from "./livepreview";
+import { tableSlashCommand } from "./livepreview/table/insert";
 import { styleSlashCommands } from "./styles";
 
 const highlight = HighlightStyle.define([
@@ -143,7 +144,6 @@ function citationCompletions(context: CompletionContext): CompletionResult | nul
 const SLASH_COMMANDS: { label: string; detail: string; template: string }[] = [
   { label: "/figure", detail: "Image with caption and label", template: SNIPPETS.figure },
   { label: "/figure-wide", detail: "Figure across both columns", template: SNIPPETS.wideFigure },
-  { label: "/table", detail: "Table with caption and label", template: SNIPPETS.table },
   { label: "/equation", detail: "Numbered display equation", template: SNIPPETS.equation },
   { label: "/code", detail: "Fenced code block", template: SNIPPETS.code },
   { label: "/quote", detail: "Block quote", template: SNIPPETS.quote },
@@ -164,6 +164,7 @@ function slashCompletions(context: CompletionContext): CompletionResult | null {
     from,
     options: [
       ...SLASH_COMMANDS.map((c) => snippetCompletion(c.template, { label: c.label, detail: c.detail, type: "keyword" })),
+      tableSlashCommand,
       refSlashCommand,
       ...styleSlashCommands(),
     ],
