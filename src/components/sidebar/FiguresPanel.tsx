@@ -1,9 +1,9 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { FileText, ImagePlus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { insertBlock } from "@/editor/commands";
 import { withEditor } from "@/editor/bridge";
 import { api, joinPath } from "@/lib/api";
+import { importPickedFigure, pickFiles, type PickedFile } from "@/lib/platform";
 import { refreshFigures } from "@/session";
 import { store, useStore } from "@/store";
 import { notify } from "../Toaster";
@@ -16,11 +16,11 @@ export function figureSnippet(path: string): string {
   return `![\${Caption}](${path}){#fig:\${${stem}} width=80%}`;
 }
 
-export async function importFigures(paths: string[]): Promise<string[]> {
+export async function importFigures(files: PickedFile[]): Promise<string[]> {
   const dir = store.get().dir;
   if (!dir) return [];
   const imported: string[] = [];
-  for (const p of paths) imported.push(await api.importFigure(dir, p));
+  for (const f of files) imported.push(await importPickedFigure(dir, f));
   await refreshFigures();
   return imported;
 }
@@ -64,9 +64,9 @@ export function FiguresPanel() {
   const figures = useStore((s) => s.figures);
 
   async function pick() {
-    const picked = await open({ multiple: true, filters: [{ name: "Images", extensions: FIGURE_EXTENSIONS }] });
-    if (!picked) return;
-    const added = await importFigures([picked].flat());
+    const picked = await pickFiles("Images", FIGURE_EXTENSIONS);
+    if (picked.length === 0) return;
+    const added = await importFigures(picked);
     notify(`Added ${added.length} figure${added.length === 1 ? "" : "s"}`);
   }
 

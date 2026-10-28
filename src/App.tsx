@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect } from "react";
 import { openProjectAt } from "@/actions";
+import { FolderPickerHost } from "@/components/FolderPicker";
 import { TemplateGallery } from "@/components/TemplateGallery";
 import { Toaster } from "@/components/Toaster";
 import { api } from "@/lib/api";
@@ -49,6 +50,7 @@ export default function App() {
         <Welcome />
       )}
       {gallery && (gallery === "create" || dir) && <TemplateGallery mode={gallery} />}
+      <FolderPickerHost />
       <Toaster />
     </>
   );

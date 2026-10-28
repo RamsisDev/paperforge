@@ -28,6 +28,8 @@ export default defineConfig(() => ({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
+    // Browser mode: the Rust backend runs as `paperforge-web` (npm run web).
+    proxy: { "/api": "http://127.0.0.1:1430" },
     watch: { ignored: ["**/src-tauri/**"] },
   },
 }));

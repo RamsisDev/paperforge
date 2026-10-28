@@ -1,4 +1,3 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { BookOpen, ChevronsUpDown, FileCode, FilePlus, FileText } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -6,7 +5,8 @@ import { useShallow } from "zustand/react/shallow";
 import { exportPdf, openProjectDialog } from "@/actions";
 import { insertBlock } from "@/editor/commands";
 import { editorBridge } from "@/editor/bridge";
-import { api, baseName } from "@/lib/api";
+import { baseName } from "@/lib/api";
+import { onFileDrop, readPickedText } from "@/lib/platform";
 import { parseBib } from "@/lib/bib";
 import { partTitle } from "@/lib/parts";
 import { unitName } from "@/lib/templates";
@@ -112,37 +112,35 @@ function extensionOf(path: string): string {
 
 /** Files dropped on the window: images become figures at the drop point, .bib files merge. */
 function useFileDrop() {
-  useEffect(() => {
-    const unlisten = getCurrentWebview().onDragDropEvent(async (event) => {
-      if (event.payload.type !== "drop") return;
-      const { paths, position } = event.payload;
-      try {
-        const images = paths.filter((p) => FIGURE_EXTENSIONS.includes(extensionOf(p)));
-        const bibs = paths.filter((p) => extensionOf(p) === "bib");
-        if (images.length) {
-          const added = await importFigures(images);
-          const view = editorBridge.view;
-          if (view && isPartFile(store.get().activeFile)) {
-            const ratio = window.devicePixelRatio || 1;
-            const pos = view.posAtCoords({ x: position.x / ratio, y: position.y / ratio });
-            if (pos !== null) view.dispatch({ selection: { anchor: pos } });
-            for (const path of added) insertBlock(view, figureSnippet(path));
+  useEffect(
+    () =>
+      onFileDrop(async ({ files, x, y }) => {
+        try {
+          const images = files.filter((f) => FIGURE_EXTENSIONS.includes(extensionOf(f.name)));
+          const bibs = files.filter((f) => extensionOf(f.name) === "bib");
+          if (images.length) {
+            const added = await importFigures(images);
+            const view = editorBridge.view;
+            if (view && isPartFile(store.get().activeFile)) {
+              const pos = view.posAtCoords({ x, y });
+              if (pos !== null) view.dispatch({ selection: { anchor: pos } });
+              for (const path of added) insertBlock(view, figureSnippet(path));
+            }
+            notify(`Added ${added.length} figure${added.length === 1 ? "" : "s"}`);
           }
-          notify(`Added ${added.length} figure${added.length === 1 ? "" : "s"}`);
+          for (const file of bibs) {
+            const text = await readPickedText(file);
+            const known = new Set(parseBib(store.get().bib).map((e) => e.key));
+            const fresh = parseBib(text).filter((e) => !known.has(e.key));
+            if (fresh.length) setBib(`${store.get().bib.trimEnd()}\n\n${text.trim()}\n`);
+            notify(`Imported ${fresh.length} reference${fresh.length === 1 ? "" : "s"}`);
+          }
+        } catch (e) {
+          notify(String(e), "error");
         }
-        for (const path of bibs) {
-          const text = new TextDecoder().decode(await api.readBinary(path));
-          const known = new Set(parseBib(store.get().bib).map((e) => e.key));
-          const fresh = parseBib(text).filter((e) => !known.has(e.key));
-          if (fresh.length) setBib(`${store.get().bib.trimEnd()}\n\n${text.trim()}\n`);
-          notify(`Imported ${fresh.length} reference${fresh.length === 1 ? "" : "s"}`);
-        }
-      } catch (e) {
-        notify(String(e), "error");
-      }
-    });
-    return () => void unlisten.then((f) => f());
-  }, []);
+      }),
+    [],
+  );
 }
 
 function useShortcuts() {

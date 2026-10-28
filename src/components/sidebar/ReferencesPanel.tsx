@@ -1,9 +1,8 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { FileText, Plus, Search, Upload } from "lucide-react";
 import { useDeferredValue, useMemo, useState } from "react";
 import { insertInline } from "@/editor/commands";
 import { withEditor } from "@/editor/bridge";
-import { api } from "@/lib/api";
+import { pickFiles, readPickedText } from "@/lib/platform";
 import { parseBib, shortAuthors } from "@/lib/bib";
 import { setBib } from "@/session";
 import { jumpTo, store, useStore } from "@/store";
@@ -38,12 +37,12 @@ export function ReferencesPanel() {
     : entries;
 
   async function importBib() {
-    const picked = await open({ multiple: true, filters: [{ name: "BibTeX", extensions: ["bib"] }] });
-    if (!picked) return;
+    const picked = await pickFiles("BibTeX", ["bib"]);
+    if (picked.length === 0) return;
     const known = new Set(parseBib(store.get().bib).map((e) => e.key));
     let added = 0;
-    for (const path of [picked].flat()) {
-      const text = new TextDecoder().decode(await api.readBinary(path));
+    for (const file of picked) {
+      const text = await readPickedText(file);
       const fresh = parseBib(text).filter((e) => !known.has(e.key));
       if (fresh.length === 0) continue;
       fresh.forEach((e) => known.add(e.key));

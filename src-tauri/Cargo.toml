@@ -4,6 +4,16 @@ version = "0.1.0"
 description = "Local editor that typesets Markdown papers with journal LaTeX templates"
 authors = ["PaperForge"]
 edition = "2024"
+default-run = "paperforge"
+
+[features]
+# Browser dev server (`npm run web`); not part of the desktop build.
+web = ["dep:tiny_http"]
+
+[[bin]]
+name = "paperforge-web"
+path = "src/bin/paperforge-web.rs"
+required-features = ["web"]
 
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin name (cargo#8519 on Windows).
@@ -21,6 +31,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "sync", "time", "fs", "io-util", "macros", "rt-multi-thread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tiny_http = { version = "0.12", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

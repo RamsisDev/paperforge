@@ -1,7 +1,6 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { notify } from "@/components/Toaster";
 import { api, baseName, joinPath, type TemplateId } from "@/lib/api";
+import { pickFolder, revealInFileManager, saveOutput } from "@/lib/platform";
 import { compileNow, loadProject } from "@/session";
 import { store } from "@/store";
 
@@ -28,35 +27,42 @@ async function freshBuild(): Promise<boolean> {
 export async function exportPdf() {
   const { dir, meta } = store.get();
   if (!dir || !(await freshBuild())) return;
-  const dest = await save({
-    defaultPath: `${slug(meta?.title ?? "paper")}.pdf`,
-    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  const saved = await saveOutput({
+    defaultName: `${slug(meta?.title ?? "paper")}.pdf`,
+    label: "PDF",
+    extension: "pdf",
+    write: (dest) => api.exportPdf(dir, dest),
+    read: () => api.readBinary(joinPath(dir, ".build/paper.pdf")),
   });
-  if (!dest) return;
-  await api.exportPdf(dir, dest);
-  notify(`Saved ${baseName(dest)}`);
+  if (saved) notify(`Saved ${baseName(saved)}`);
 }
 
 export async function exportLatex() {
   const { dir, meta } = store.get();
   if (!dir || !(await freshBuild())) return;
-  const dest = await save({
-    defaultPath: `${slug(meta?.title ?? "paper")}-latex.zip`,
-    filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+  const staged = joinPath(dir, ".build/export.zip");
+  const saved = await saveOutput({
+    defaultName: `${slug(meta?.title ?? "paper")}-latex.zip`,
+    label: "ZIP archive",
+    extension: "zip",
+    write: (dest) => api.exportZip(dir, dest),
+    read: async () => {
+      await api.exportZip(dir, staged);
+      return api.readBinary(staged);
+    },
   });
-  if (!dest) return;
-  await api.exportZip(dir, dest);
-  notify(`Saved ${baseName(dest)} — ready to upload to Overleaf or a journal`);
+  if (saved) notify(`Saved ${baseName(saved)} — ready to upload to Overleaf or a journal`);
 }
 
 export async function revealProject() {
   const dir = store.get().dir;
-  if (dir) await revealItemInDir(joinPath(dir, "paper.json"));
+  if (!dir) return;
+  if (!(await revealInFileManager(joinPath(dir, "paper.json")))) notify(`Project folder: ${dir}`);
 }
 
 export async function openProjectDialog() {
-  const dir = await open({ directory: true, title: "Open a PaperForge project folder" });
-  if (typeof dir === "string") await openProjectAt(dir);
+  const dir = await pickFolder({ title: "Open a PaperForge project folder", mode: "open" });
+  if (dir) await openProjectAt(dir);
 }
 
 export async function openProjectAt(dir: string) {
@@ -76,11 +82,11 @@ export interface NewProject {
 
 /** Asks for a folder and creates the project there; resolves with whether a project was opened. */
 export async function createProjectDialog(project: NewProject): Promise<boolean> {
-  const dir = await open({
-    directory: true,
+  const dir = await pickFolder({
     title: project.sample ? "Choose a folder for the sample paper" : "Choose an empty folder for the new paper",
+    mode: "create",
   });
-  if (typeof dir !== "string") return false;
+  if (!dir) return false;
   try {
     loadProject(await api.createProject(dir, project.template, project.title, project.language, project.sample));
   } catch (e) {

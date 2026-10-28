@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { call as invoke } from "./platform";
 
 export type TemplateId = "article" | "ieee" | "acm" | "elsevier" | "lncs" | "report" | "book";
 
@@ -111,7 +111,17 @@ export const api = {
     invoke<CompileOutcome>("compile", { dir, mode, focus }),
   exportPdf: (dir: string, dest: string) => invoke<void>("export_pdf", { dir, dest }),
   exportZip: (dir: string, dest: string) => invoke<void>("export_zip", { dir, dest }),
+  /** Browser only: folders for the in-page folder picker. */
+  browse: (path: string | null) => invoke<FolderListing>("_browse", { path }),
 };
+
+export interface FolderListing {
+  path: string;
+  parent: string | null;
+  home: string | null;
+  isProject: boolean;
+  dirs: { name: string; path: string; isProject: boolean }[];
+}
 
 export function joinPath(dir: string, rel: string): string {
   const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";

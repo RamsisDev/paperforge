@@ -7,7 +7,7 @@
 // Every backend write (saves and structure commands) goes through one queue, so a structure
 // command never races a save of the meta or of a part it rewrites.
 
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { setWindowTitle } from "@/lib/platform";
 import { api, baseName, type CompileMode, type PaperMeta, type Part, type ProjectSnapshot } from "@/lib/api";
 import { usesChapters } from "@/lib/templates";
 import { BIB_FILE, TEX_FILE, initialProjectState, isPartFile, store, useStore, type EditorFile } from "@/store";
@@ -54,14 +54,14 @@ export function loadProject(snapshot: ProjectSnapshot) {
     activeFile: snapshot.parts[0]?.file ?? BIB_FILE,
   });
   rememberProject(snapshot.dir, snapshot.meta.title);
-  void getCurrentWindow().setTitle(`${snapshot.meta.title || baseName(snapshot.dir)} — PaperForge`);
+  setWindowTitle(`${snapshot.meta.title || baseName(snapshot.dir)} — PaperForge`);
   scheduleCompile("full", 0);
 }
 
 export async function closeProject() {
   await flushSaves();
   store.set({ ...initialProjectState });
-  void getCurrentWindow().setTitle("PaperForge");
+  setWindowTitle("PaperForge");
 }
 
 function queueSave() {
@@ -136,7 +136,7 @@ export function updateMeta(patch: Partial<PaperMeta>) {
   pendingFields.add("meta");
   queueSave();
   if (patch.title !== undefined) {
-    void getCurrentWindow().setTitle(`${next.title || "Untitled"} — PaperForge`);
+    setWindowTitle(`${next.title || "Untitled"} — PaperForge`);
   }
 }
 

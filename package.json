@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "web": "node scripts/web.mjs",
     "sidecars": "node scripts/fetch-sidecars.mjs",
     "warm-tex-cache": "cargo test --manifest-path src-tauri/Cargo.toml --test toolchain -- --ignored --test-threads=1",
     "test": "vitest run && cargo test --manifest-path src-tauri/Cargo.toml --lib",
