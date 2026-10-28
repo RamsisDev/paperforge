@@ -24,6 +24,7 @@ import { buildRegion, topBlocks } from "./build";
 import { REVEAL, writingExtensions } from "./registry";
 import { activeSpans, expandRegion, touchesActive, type Span } from "./syntax";
 import { forgetImages } from "./widgets";
+import "./table";
 
 export {
   previewReplace,

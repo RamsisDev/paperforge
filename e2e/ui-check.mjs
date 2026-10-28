@@ -725,6 +725,69 @@ console.log(
   JSON.stringify(await page.locator(".pf-lp-caption").allTextContents()),
 );
 await shot("23c-writing-math-figure");
+
+// Writing mode tables: the sample's pipe table is a grid; each committed edit rewrites only its
+// lines as an aligned pipe table, and one Mod-Z undoes one edit.
+const docText = () =>
+  page.evaluate(async () => {
+    const url = performance.getEntriesByType("resource").map((e) => e.name).find((n) => n.includes("@codemirror_view"));
+    const { EditorView } = await import(url);
+    return EditorView.findFromDOM(document.querySelector(".cm-editor")).state.doc.toString();
+  });
+const TABLE = /\n(\|[^\n]*Model[\s\S]*?)\n\n/;
+const tableSource = async () => TABLE.exec(await docText())?.[1];
+const grid = page.locator(".pf-table").first();
+await grid.scrollIntoViewIfNeeded();
+const outsideTable = (await docText()).replace(TABLE, "");
+console.log("table grid: cells", await grid.locator("th, td").count(), "· caption", JSON.stringify(await page.locator(".pf-table-caption").first().textContent()));
+await grid.locator("td", { hasText: "0.812" }).click();
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("0.900");
+await page.keyboard.press("Tab");
+console.log("table after a cell edit:\n" + (await tableSource()));
+await grid.hover();
+await grid.getByRole("button", { name: "Add row below" }).click();
+await page.keyboard.type("Small");
+await page.keyboard.press("Enter");
+await grid.locator("td").first().click();
+await grid.getByRole("button", { name: "Align center" }).click();
+await settle(200);
+await shot("23d-writing-table-grid");
+console.log("table after adding a row and centering column 1:\n" + (await tableSource()));
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
+console.log("table after one undo:\n" + (await tableSource()));
+console.log("text outside the table unchanged:", (await docText()).replace(TABLE, "") === outsideTable);
+await page.getByRole("textbox", { name: "Table caption" }).click();
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("Results on the held-out set.");
+await page.keyboard.press("Enter");
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("held out");
+await page.keyboard.press("Enter");
+await settle(200);
+console.log("caption after editing its text and label:", JSON.stringify((await docText()).match(/\n(: [^\n]*)/)?.[1]));
+await grid.getByRole("button", { name: "Edit as text" }).click();
+await settle(200);
+console.log("edit as text: grids", await page.locator(".pf-table").count(), "· cursor line", JSON.stringify(await activeLineText()));
+
+// `/table` asks for the size with a small grid, then inserts an aligned table with caption and label.
+await page.keyboard.press("ControlOrMeta+End");
+await page.mouse.move(5, 890);
+await page.keyboard.type("\n\n/table");
+await page.locator(".cm-tooltip-autocomplete li[aria-selected]", { hasText: "/table" }).waitFor({ timeout: 5000 });
+await page.keyboard.press("Enter");
+await page.getByRole("dialog", { name: "Insert table" }).waitFor({ timeout: 5000 });
+await page.keyboard.press("ArrowRight");
+await shot("23e-table-picker");
+console.log("table picker:", await page.locator(".pf-table-picker-size").textContent());
+await page.keyboard.press("Enter");
+await settle(200);
+const inserted = await docText();
+console.log("inserted table:\n" + inserted.slice(inserted.lastIndexOf("| Column 1")));
+await page.keyboard.press("Escape");
+await page.keyboard.press("ControlOrMeta+z");
+await settle(200);
 await modeButton("Source").click();
 await settle(200);
 console.log(

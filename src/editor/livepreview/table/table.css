@@ -1,0 +1,178 @@
+.pf-table {
+  position: relative;
+  padding: 26px 0 6px;
+  font-family: var(--font-sans);
+}
+.pf-table-toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.pf-table:hover .pf-table-toolbar,
+.pf-table:focus-within .pf-table-toolbar {
+  opacity: 1;
+}
+.pf-table-group {
+  display: inline-flex;
+  border: 1px solid var(--pf-line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.pf-table-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 0;
+  font: 500 11px/1 var(--font-sans);
+  color: var(--pf-muted);
+  background: var(--pf-raised);
+  cursor: pointer;
+}
+.pf-table-group button + button {
+  border-left: 1px solid var(--pf-line);
+}
+.pf-table-toolbar button:hover {
+  color: inherit;
+}
+.pf-table-toolbar button[aria-pressed="true"] {
+  color: var(--pf-accent);
+  background: color-mix(in srgb, var(--pf-accent) 12%, transparent);
+}
+.pf-table-toolbar .pf-table-source {
+  margin-left: auto;
+  border: 1px solid var(--pf-line);
+  border-radius: 5px;
+}
+.pf-table-grid {
+  border-collapse: collapse;
+  min-width: 40%;
+  max-width: 100%;
+  font-size: 0.95em;
+  line-height: 1.45;
+}
+.pf-table-grid th,
+.pf-table-grid td {
+  min-width: 3em;
+  padding: 3px 10px;
+  border: 1px solid var(--pf-line);
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  outline: none;
+  cursor: text;
+}
+.pf-table-grid th {
+  font-weight: 600;
+  background: var(--pf-raised);
+}
+.pf-table-headless thead th {
+  height: 6px;
+  padding: 0 10px;
+  font-size: 0;
+}
+.pf-table-grid th:focus,
+.pf-table-grid td:focus {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--pf-accent) 60%, transparent);
+}
+.pf-table-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 0 2px;
+  font-family: var(--font-sans);
+  font-size: 0.9em;
+  color: var(--pf-muted);
+}
+.pf-table-caption-name {
+  font-weight: 600;
+}
+.pf-table-caption-text {
+  min-width: 6em;
+  outline: none;
+  border-bottom: 1px dashed transparent;
+  cursor: text;
+}
+.pf-table-caption-text:hover,
+.pf-table-caption-text:focus {
+  border-bottom-color: var(--pf-line);
+}
+.pf-table-caption-text:empty::before {
+  content: "Caption";
+  color: var(--pf-faint);
+}
+.pf-table-label {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--pf-faint);
+  background: var(--pf-raised);
+}
+.pf-table-label input {
+  padding: 0;
+  border: 0;
+  font: inherit;
+  color: var(--pf-muted);
+  background: transparent;
+  outline: none;
+}
+.pf-table-label input[aria-invalid="true"] {
+  color: var(--pf-danger);
+  text-decoration: underline wavy;
+}
+.pf-table-convert button {
+  margin-left: 10px;
+  padding: 0 7px;
+  border: 1px solid var(--pf-line);
+  border-radius: 5px;
+  font: 500 11px/1.7 var(--font-sans);
+  color: var(--pf-muted);
+  background: var(--pf-raised);
+  cursor: pointer;
+}
+.pf-table-picker {
+  position: fixed;
+  z-index: 60;
+  padding: 8px;
+  border: 1px solid var(--pf-line);
+  border-radius: 8px;
+  font: 500 11px/1.4 var(--font-sans);
+  color: var(--pf-muted);
+  background: var(--pf-panel);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.14);
+  outline: none;
+}
+.pf-table-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 16px);
+  gap: 3px;
+}
+.pf-table-picker-grid span {
+  width: 16px;
+  height: 14px;
+  border: 1px solid var(--pf-line);
+  border-radius: 2px;
+}
+.pf-table-picker-grid span.pf-header {
+  background: var(--pf-raised);
+}
+.pf-table-picker-grid span.pf-on {
+  border-color: var(--pf-accent);
+  background: color-mix(in srgb, var(--pf-accent) 22%, transparent);
+}
+.pf-table-picker-size {
+  margin-top: 6px;
+  text-align: center;
+}
