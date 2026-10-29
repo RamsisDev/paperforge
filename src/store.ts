@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { escapeRegExp, type FindOptions } from "@/editor/findAcrossParts";
-import type { Diagnostic, HistoryStatus, LabelRef, PaperMeta, Part, TocEntry, VersionInfo } from "@/lib/api";
+import type { CollabInfo, Diagnostic, HistoryStatus, LabelRef, PaperMeta, Part, TocEntry, VersionInfo } from "@/lib/api";
 
 export const BIB_FILE = "refs.bib";
 export const TEX_FILE = "paper.tex";
@@ -33,6 +33,28 @@ export interface Jump {
   /** Text to select instead of placing the cursor at the line start. */
   select?: { from: number; to: number };
   nonce: number;
+}
+
+export interface CollabPeer {
+  id: number;
+  name: string;
+  color: string;
+  role: "host" | "guest";
+  /** The file the person has open. */
+  file: EditorFile | null;
+}
+
+/** A shared session: this window hosts it or joined it. */
+export interface CollabState {
+  role: "host" | "guest";
+  status: "connected" | "reconnecting";
+  /** This window's own id among `peers`. */
+  you: number;
+  peers: CollabPeer[];
+  /** The code and link to invite others; the host's only. */
+  info: CollabInfo | null;
+  /** Bumped when a shared file finished syncing, so the editor binds it. */
+  synced: number;
 }
 
 export interface FindState extends FindOptions {
@@ -96,6 +118,8 @@ interface State {
   compare: { from: string; to: string | null } | null;
   /** The "Save version" dialog is open. */
   versionDialog: boolean;
+  collab: CollabState | null;
+  shareDialog: boolean;
 }
 
 const storedTheme = (localStorage.getItem("paperforge.theme") as Theme | null) ??
@@ -130,6 +154,8 @@ export const initialProjectState = {
   historyMore: false,
   compare: null as State["compare"],
   versionDialog: false,
+  collab: null as CollabState | null,
+  shareDialog: false,
 };
 
 export const useStore = create<State>(() => ({

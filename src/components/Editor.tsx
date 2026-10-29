@@ -1,8 +1,10 @@
 import { isolateHistory } from "@codemirror/commands";
 import { setDiagnostics, type Diagnostic as CmDiagnostic } from "@codemirror/lint";
-import { EditorSelection, EditorState, type ChangeSpec, type Extension, type TransactionSpec } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorSelection, EditorState, Prec, type ChangeSpec, type Extension, type TransactionSpec } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import { editShared, isShared, sharedText, type SharedText } from "@/collab/live";
 import { editorBridge } from "@/editor/bridge";
 import { untracked } from "@/editor/changes/track";
 import {
@@ -36,6 +38,14 @@ function storeText(file: EditorFile, text: string) {
   else if (file !== TEX_FILE) setPart(file, text);
 }
 
+/** A shared file edits its Yjs text, with everyone's cursors; read-only until the text arrives. */
+function collabExtensions(file: EditorFile, shared: SharedText | undefined): Extension {
+  if (shared) {
+    return [Prec.highest(keymap.of(yUndoManagerKeymap)), yCollab(shared.text, shared.awareness, { undoManager: shared.undo })];
+  }
+  return isShared(file) ? EditorState.readOnly.of(true) : [];
+}
+
 function extensionsFor(file: EditorFile, onChange: Extension) {
   if (file === BIB_FILE) return bibExtensions(onChange);
   if (file === TEX_FILE) return texExtensions();
@@ -47,6 +57,8 @@ export function Editor() {
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const states = useRef(new Map<EditorFile, EditorState>());
+  /** The shared text the open file's state edits, null for a plain one. */
+  const bound = useRef<SharedText | null>(null);
   const scroll = useRef(new Map<EditorFile, number>());
   const current = useRef<EditorFile>("");
   /** Text this editor last wrote to the store, so its own echoes are not re-applied. */
@@ -71,13 +83,23 @@ export function Editor() {
         store.set({ cursor: { line: line.number, col: head - line.from + 1 } });
       }
     });
-    return EditorState.create({ doc: contents(store.get()).get(file) ?? "", extensions: extensionsFor(file, onChange) });
+    const shared = sharedText(file);
+    const doc = shared ? shared.text.toString() : (contents(store.get()).get(file) ?? "");
+    return EditorState.create({ doc, extensions: [extensionsFor(file, onChange), collabExtensions(file, shared)] });
+  }
+
+  /** Shows `file` in the view; a shared file always gets a fresh state, as hidden states miss remote edits. */
+  function show(view: EditorView, file: EditorFile, state?: EditorState) {
+    const fresh = !state || isShared(file);
+    view.setState(fresh ? createState(file) : state);
+    bound.current = fresh ? (sharedText(file) ?? null) : null;
   }
 
   /** Edits a file through its own state, so Mod-Z in that file undoes the edit. */
   function edit(file: EditorFile, changes: ChangeSpec) {
     const text = contents(store.get()).get(file);
     if (text === undefined || file === TEX_FILE) return;
+    if (file !== current.current && editShared(file, changes)) return;
     const spec: TransactionSpec = { changes, userEvent: "input.replace", annotations: [isolateHistory.of("full"), untracked.of(true)] };
     const view = viewRef.current;
     if (view && file === current.current) {
@@ -102,7 +124,8 @@ export function Editor() {
     markdownSpot.current = null;
     const file = store.get().activeFile;
     current.current = file;
-    const view = new EditorView({ state: createState(file), parent: host.current });
+    const view = new EditorView({ parent: host.current });
+    show(view, file);
     viewRef.current = view;
     editorBridge.view = view;
     editorBridge.edit = edit;
@@ -139,10 +162,8 @@ export function Editor() {
       }
     }
     let next = states.current.get(activeFile);
-    if (!next || (activeFile === TEX_FILE && next.doc.toString() !== store.get().tex)) {
-      next = createState(activeFile);
-    }
-    view.setState(next);
+    if (activeFile === TEX_FILE && next?.doc.toString() !== store.get().tex) next = undefined;
+    show(view, activeFile, next);
     syncChapterTemplate(view);
     syncEditorMode(view);
     current.current = activeFile;
@@ -181,6 +202,8 @@ export function Editor() {
         const before = contents(prev);
         for (const file of before.keys()) if (!now.has(file)) states.current.delete(file);
         for (const [file, value] of now) {
+          // Shared texts reach the view through their Yjs binding.
+          if (bound.current && file === current.current) continue;
           if (value === before.get(file) || value === emitted.current.get(file)) continue;
           emitted.current.delete(file);
           if (file !== current.current) {
@@ -221,6 +244,31 @@ export function Editor() {
   }
 
   useEffect(() => useStore.subscribe((s, prev) => s.diagnostics !== prev.diagnostics && applyLint()), []);
+
+  // A session started or ended, or the open file's shared text arrived: rebind the view.
+  useEffect(
+    () =>
+      useStore.subscribe((s, prev) => {
+        const view = viewRef.current;
+        const sessionChanged = (s.collab === null) !== (prev.collab === null);
+        if (!view || (!sessionChanged && s.collab?.synced === prev.collab?.synced)) return;
+        const file = current.current;
+        const sharable = (f: EditorFile) => f !== TEX_FILE && f !== PREAMBLE_FILE;
+        if (sessionChanged) for (const f of [...states.current.keys()]) if (sharable(f)) states.current.delete(f);
+        if (!sharable(file) || (!sessionChanged && bound.current === (sharedText(file) ?? null))) return;
+        const { scrollTop } = view.scrollDOM;
+        const head = view.state.selection.main.head;
+        states.current.delete(file);
+        show(view, file);
+        const doc = view.state.doc;
+        view.dispatch({ selection: EditorSelection.cursor(Math.min(head, doc.length)) });
+        syncChapterTemplate(view);
+        syncEditorMode(view);
+        view.scrollDOM.scrollTop = scrollTop;
+        applyLint();
+      }),
+    [],
+  );
 
   useEffect(
     () =>

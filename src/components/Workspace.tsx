@@ -17,6 +17,7 @@ import { HistoryDiffView } from "./HistoryDiffView";
 import { Preview } from "./Preview";
 import { ProblemsPanel } from "./ProblemsPanel";
 import { SaveVersionHost } from "./SaveVersionDialog";
+import { ShareHost } from "./ShareDialog";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { notify } from "./Toaster";
@@ -212,6 +213,7 @@ export function Workspace() {
       </Group>
       <StatusBar />
       <SaveVersionHost />
+      <ShareHost />
     </div>
   );
 }

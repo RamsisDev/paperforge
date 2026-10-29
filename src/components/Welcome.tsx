@@ -1,11 +1,14 @@
-import { FilePlus, FolderOpen, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { FilePlus, FolderOpen, Users, X } from "lucide-react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { openProjectAt, openProjectDialog } from "@/actions";
+import { joinSession } from "@/collab";
+import { inviteInLocation } from "@/collab/invite";
+import { hasLocalBackend } from "@/lib/platform";
 import { forgetProject, recentProjects } from "@/lib/recent";
 import { TEMPLATES } from "@/lib/templates";
-import { openGallery } from "@/store";
+import { openGallery, store } from "@/store";
 import { notify } from "./Toaster";
-import { MOD } from "./ui";
+import { Button, Field, Input, MOD } from "./ui";
 
 function Action({ icon, title, detail, onClick }: { icon: ReactNode; title: string; detail: string; onClick: () => void }) {
   return (
@@ -26,8 +29,51 @@ function run(task: () => Promise<unknown>) {
   task().catch((e) => notify(String(e), "error"));
 }
 
+function JoinForm({ invite, onCancel }: { invite: string; onCancel?: () => void }) {
+  const [code, setCode] = useState(invite);
+  const [name, setName] = useState(() => store.get().commentAuthor);
+  const [busy, setBusy] = useState(false);
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    if (busy || !code.trim() || !name.trim()) return;
+    setBusy(true);
+    joinSession(code, name.trim())
+      .catch((err) => notify(err instanceof Error ? err.message : String(err), "error"))
+      .finally(() => setBusy(false));
+  }
+  return (
+    <form onSubmit={submit} className="space-y-3 rounded-xl border border-accent bg-panel p-4">
+      <p className="text-xs text-muted">Edit a paper someone shares on your network. Ask them for the code, or open their link.</p>
+      <Field label="Code or link">
+        <Input
+          autoFocus={!invite}
+          value={code}
+          placeholder="e.g. 60N00J-A1D003-ZGF01A"
+          className="font-mono"
+          onChange={(e) => setCode(e.target.value)}
+        />
+      </Field>
+      <Field label="Your name" hint="shown next to your cursor">
+        <Input autoFocus={!!invite} value={name} maxLength={40} placeholder="e.g. Ana" onChange={(e) => setName(e.target.value)} />
+      </Field>
+      <div className="flex justify-end gap-2">
+        {onCancel && (
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+        )}
+        <Button type="submit" variant="primary" disabled={busy || !code.trim() || !name.trim()}>
+          {busy ? "Joining…" : "Join"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 export function Welcome() {
   const [recent, setRecent] = useState(recentProjects);
+  const [invite] = useState(inviteInLocation);
+  const [joining, setJoining] = useState(invite !== null || !hasLocalBackend);
   return (
     <div className="flex h-full items-center justify-center overflow-auto p-8">
       <div className="w-full max-w-xl space-y-8">
@@ -45,21 +91,35 @@ export function Welcome() {
         </div>
 
         <div className="grid gap-2.5">
-          <Action
-            icon={<FilePlus size={18} />}
-            title="New paper"
-            detail="Pick a template, blank or from a sample, in a folder you choose"
-            onClick={() => openGallery("create")}
-          />
-          <Action
-            icon={<FolderOpen size={18} />}
-            title="Open paper…"
-            detail={`A folder with paper.json · ${MOD}O`}
-            onClick={() => run(openProjectDialog)}
-          />
+          {hasLocalBackend && (
+            <>
+              <Action
+                icon={<FilePlus size={18} />}
+                title="New paper"
+                detail="Pick a template, blank or from a sample, in a folder you choose"
+                onClick={() => openGallery("create")}
+              />
+              <Action
+                icon={<FolderOpen size={18} />}
+                title="Open paper…"
+                detail={`A folder with paper.json · ${MOD}O`}
+                onClick={() => run(openProjectDialog)}
+              />
+            </>
+          )}
+          {joining ? (
+            <JoinForm invite={invite ?? ""} onCancel={hasLocalBackend ? () => setJoining(false) : undefined} />
+          ) : (
+            <Action
+              icon={<Users size={18} />}
+              title="Join a session…"
+              detail="Edit together with someone sharing a paper on your network"
+              onClick={() => setJoining(true)}
+            />
+          )}
         </div>
 
-        {recent.length > 0 && (
+        {hasLocalBackend && recent.length > 0 && (
           <div className="space-y-1.5">
             <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Recent</h2>
             <ul className="overflow-hidden rounded-xl border border-line bg-panel">

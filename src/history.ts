@@ -8,6 +8,7 @@
 import { notify } from "@/components/Toaster";
 import { api, type VersionInfo } from "@/lib/api";
 import { sessionLabel, versionDate, whenLabel } from "@/lib/history";
+import { isGuest } from "@/collab/live";
 import { flushSaves, restructure, serial } from "@/session";
 import { store, useStore } from "@/store";
 
@@ -66,7 +67,8 @@ export function structureChanged() {
 async function autosave() {
   clearTimeout(idleTimer);
   const dir = store.get().dir;
-  if (!dir || !enabled()) return;
+  // The host's window records the shared paper's history.
+  if (!dir || !enabled() || isGuest()) return;
   lastSnapshot = Date.now();
   try {
     if (await serial(() => api.historyAutosave(dir))) void refreshHistory(dir);
@@ -153,7 +155,7 @@ export function versionAfterExport(what: "PDF" | "Review PDF" | "LaTeX") {
 export async function versionOnLeave() {
   clearTimeout(idleTimer);
   const dir = store.get().dir;
-  if (!dir || !enabled()) return;
+  if (!dir || !enabled() || isGuest()) return;
   const start = new Date(session?.start ?? openedAt);
   const end = new Date(session?.end ?? Date.now());
   try {

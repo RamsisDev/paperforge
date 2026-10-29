@@ -6,9 +6,22 @@
 //
 // Every backend write (saves and structure commands) goes through one queue, so a structure
 // command never races a save of the meta or of a part it rewrites.
+//
+// In a shared session parts and refs.bib are not saved from here: they are Yjs texts the host's
+// backend writes (see `collab/live.ts`). The host compiles for everyone, at most one compile at a
+// time and at least every few seconds while people type; guests get its PDF.
 
 import { onQuitRequested, setWindowTitle } from "@/lib/platform";
-import { api, baseName, type CompileMode, type PaperMeta, type Part, type ProjectSnapshot } from "@/lib/api";
+import {
+  api,
+  baseName,
+  type CompileMode,
+  type CompileOutcome,
+  type PaperMeta,
+  type Part,
+  type ProjectSnapshot,
+} from "@/lib/api";
+import { isGuest, live, replaceShared, sharedContent } from "@/collab/live";
 import { usesChapters } from "@/lib/templates";
 import {
   BIB_FILE,
@@ -29,6 +42,9 @@ const SAVE_DELAY_MS = 300;
 const COMPILE_DELAY_MS = 150;
 /** A new citation needs two passes after BibTeX; one more covers a label added in the same edit. */
 const MAX_RERUNS = 3;
+/** A shared paper compiles this long after the last edit, or this long after the first one. */
+const SHARED_COMPILE_DELAY_MS = 400;
+const SHARED_COMPILE_MAX_WAIT_MS = 2000;
 
 /** Parts edited since their last save; their current text is read from the store when written. */
 const pendingParts = new Set<string>();
@@ -52,13 +68,12 @@ function hasPending(): boolean {
 }
 
 export function loadProject(snapshot: ProjectSnapshot) {
-  clearTimeout(saveTimer);
-  clearTimeout(compileTimer);
-  pendingParts.clear();
-  pendingFields.clear();
+  dropPending();
   lastSaved = new Map(snapshot.parts.map((p) => [p.file, p.content]));
   store.set({
     ...initialProjectState,
+    // A guest joins before the project loads.
+    collab: store.get().collab,
     dir: snapshot.dir,
     meta: snapshot.meta,
     parts: snapshot.parts,
@@ -68,16 +83,33 @@ export function loadProject(snapshot: ProjectSnapshot) {
     activeFile: snapshot.parts[0]?.file ?? BIB_FILE,
     trackChanges: storedTrackChanges(snapshot.dir),
   });
-  rememberProject(snapshot.dir, snapshot.meta.title);
+  if (!isGuest()) rememberProject(snapshot.dir, snapshot.meta.title);
   setWindowTitle(`${snapshot.meta.title || baseName(snapshot.dir)} — PaperForge`);
   scheduleCompile("full", 0);
   historyOpened();
+}
+
+function dropPending() {
+  clearTimeout(saveTimer);
+  clearTimeout(compileTimer);
+  pendingParts.clear();
+  pendingFields.clear();
+  editsSince = 0;
+  compileAgain = false;
 }
 
 /** Saves pending edits and records the session as a version before the project goes away. */
 export async function leaveProject() {
   await flushSaves();
   await versionOnLeave();
+  await live.leave?.();
+}
+
+/** A guest's project when the session ends without asking: nothing can be saved any more. */
+export function dropProject() {
+  dropPending();
+  store.set({ ...initialProjectState });
+  setWindowTitle("PaperForge");
 }
 
 export async function closeProject() {
@@ -161,15 +193,27 @@ export function flushSaves(): Promise<void> {
 }
 
 export function setPart(file: string, content: string) {
+  if (replaceShared(file, content)) return;
   store.set((s) => ({ parts: s.parts.map((p) => (p.file === file ? { file, content } : p)) }));
   pendingParts.add(file);
   queueSave();
 }
 
 export function setBib(bib: string) {
+  if (replaceShared(BIB_FILE, bib)) return;
   store.set({ bib });
   pendingFields.add("bib");
   queueSave();
+}
+
+/** A shared file's text changed, here or in someone else's editor. */
+export function setSharedText(file: EditorFile, text: string) {
+  if (file === BIB_FILE) {
+    if (store.get().bib !== text) store.set({ bib: text });
+  } else {
+    store.set((s) => ({ parts: s.parts.map((p) => (p.file === file && p.content !== text ? { file, content: text } : p)) }));
+  }
+  if (store.get().collab?.role === "host") compileSoon();
 }
 
 export function setPreamble(preamble: string) {
@@ -207,6 +251,8 @@ function applySnapshot(snapshot: ProjectSnapshot, preferredFile?: EditorFile) {
   const current = new Map(s.parts.map((p) => [p.file, p]));
   const parts: Part[] = snapshot.parts.map((p) => {
     const old = current.get(p.file);
+    const shared = sharedContent(p.file);
+    if (shared !== undefined) return old && old.content === shared ? old : { file: p.file, content: shared };
     const untouched = lastSaved.get(p.file) === p.content;
     if (old && pendingParts.has(p.file) && untouched) return old;
     pendingParts.delete(p.file);
@@ -222,7 +268,7 @@ function applySnapshot(snapshot: ProjectSnapshot, preferredFile?: EditorFile) {
   store.set({
     meta: pendingFields.has("meta") && s.meta ? { ...s.meta, parts: partFiles, templateFile } : snapshot.meta,
     parts,
-    bib: pendingFields.has("bib") ? s.bib : snapshot.bib,
+    bib: sharedContent(BIB_FILE) ?? (pendingFields.has("bib") ? s.bib : snapshot.bib),
     preamble: pendingFields.has("preamble") ? s.preamble : (snapshot.preamble ?? null),
     figures: snapshot.figures,
     activeFile,
@@ -247,6 +293,13 @@ export async function restructure(
   structureChanged();
   if (hasPending()) queueSave();
   else scheduleCompile("preview", 0);
+}
+
+/** Someone in the shared session changed the structure, the settings, figures or the preamble. */
+export function applyRemoteSnapshot(snapshot: ProjectSnapshot) {
+  if (snapshot.dir !== store.get().dir) return;
+  applySnapshot(snapshot);
+  if (store.get().collab?.role === "host") compileSoon();
 }
 
 export function createPart(index: number, title: string) {
@@ -303,6 +356,8 @@ export function restoreTemplate() {
 /** The part a preview compiles alone, when "current chapter only" applies. */
 function compileFocus(mode: CompileMode): string | null {
   const s = store.get();
+  // A shared paper's preview is everyone's: always the whole paper.
+  if (s.collab) return null;
   if (mode !== "preview" || !s.previewFocus || !usesChapters(s.meta?.template)) return null;
   return s.parts.some((p) => p.file === s.activeFile) ? s.activeFile : null;
 }
@@ -321,6 +376,8 @@ useStore.subscribe((s, prev) => {
 });
 
 export function scheduleCompile(mode: CompileMode, delay: number) {
+  if (isGuest()) return;
+  if (store.get().collab) return compileSoon();
   clearTimeout(compileTimer);
   compileTimer = setTimeout(() => void runCompile(mode, 0, compileFocus(mode), store.get().reviewMode), delay);
 }
@@ -332,6 +389,7 @@ export function scheduleCompile(mode: CompileMode, delay: number) {
 export async function compileNow(mode: CompileMode = "full", review = store.get().reviewMode): Promise<boolean> {
   clearTimeout(compileTimer);
   await flushSaves();
+  if (isGuest()) return store.get().compile.state === "ok";
   return runCompile(mode, 0, compileFocus(mode), review);
 }
 
@@ -339,6 +397,50 @@ export async function compileNow(mode: CompileMode = "full", review = store.get(
 export function setReviewMode(reviewMode: boolean) {
   store.set({ reviewMode });
   scheduleCompile("preview", 0);
+}
+
+let editsSince = 0;
+let compiling = false;
+let compileAgain = false;
+
+/** The host's compile of a shared paper: never more than one at a time, so people typing nonstop
+ * still get a PDF every `SHARED_COMPILE_MAX_WAIT_MS`. */
+function compileSoon() {
+  const now = Date.now();
+  editsSince ||= now;
+  clearTimeout(compileTimer);
+  const wait = Math.min(SHARED_COMPILE_DELAY_MS, editsSince + SHARED_COMPILE_MAX_WAIT_MS - now);
+  compileTimer = setTimeout(() => void compileShared(), Math.max(0, wait));
+}
+
+async function compileShared() {
+  if (compiling) {
+    compileAgain = true;
+    return;
+  }
+  editsSince = 0;
+  compiling = true;
+  try {
+    // The backend wrote the shared texts before compiling: they are on disk now.
+    if (await runCompile("preview", 0, null, store.get().reviewMode)) noteSaved();
+  } finally {
+    compiling = false;
+  }
+  if (compileAgain && store.get().collab) {
+    compileAgain = false;
+    compileSoon();
+  }
+}
+
+/** A guest's view of the host's compile. */
+export function showSharedCompile(out: CompileOutcome) {
+  store.set((s) => ({
+    diagnostics: out.diagnostics,
+    toc: out.ok ? (out.toc ?? []) : s.toc,
+    labels: out.ok ? (out.labels ?? {}) : s.labels,
+    compile: { state: out.ok ? "ok" : "error", ms: out.pandocMs + out.texMs, usedNetwork: out.usedNetwork, passes: 1 },
+  }));
+  if (store.get().activeFile === TEX_FILE) void refreshTex();
 }
 
 async function runCompile(mode: CompileMode, rerun: number, focus: string | null, review: boolean): Promise<boolean> {

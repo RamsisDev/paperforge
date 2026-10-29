@@ -4,6 +4,8 @@ import { FolderPickerHost } from "@/components/FolderPicker";
 import { TemplateGallery } from "@/components/TemplateGallery";
 import { Toaster } from "@/components/Toaster";
 import { api } from "@/lib/api";
+import { hasLocalBackend } from "@/lib/platform";
+import { inviteInLocation } from "@/collab/invite";
 import { Welcome } from "@/components/Welcome";
 import { flushSaves } from "@/session";
 import { useStore } from "@/store";
@@ -24,6 +26,8 @@ export default function App() {
   useEffect(() => {
     const idle = window.requestIdleCallback ?? ((cb: () => void) => setTimeout(cb, 300));
     idle(() => void loadWorkspace());
+    // Opened from an invitation link: the welcome screen asks to join instead.
+    if (inviteInLocation() || !hasLocalBackend) return;
     api
       .startupProject()
       .then((path) => (path ? openProjectAt(path) : undefined))

@@ -5,6 +5,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/** False in a browser that loaded the app from a host's collaboration port: it can only join. */
+export const hasLocalBackend = isDesktop || import.meta.env.DEV;
 
 const WEB_HEADERS = { "x-paperforge": "1" };
 
@@ -18,8 +20,25 @@ async function webError(res: Response): Promise<never> {
   throw message;
 }
 
+type RemoteCall = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/** A guest's commands go to the host's backend instead of this machine's. */
+let remote: RemoteCall | null = null;
+/** Commands about this app itself, which stay local for a guest too. */
+const LOCAL_COMMANDS = new Set(["app_quit", "startup_project", "engine_info"]);
+
+export function setRemoteCall(call: RemoteCall | null) {
+  remote = call;
+}
+
 /** A backend command; rejects with the backend's error string, like Tauri's invoke. */
 export async function call<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (remote && !LOCAL_COMMANDS.has(command)) return remote(command, args) as Promise<T>;
+  return callLocal<T>(command, args);
+}
+
+/** A command on this machine's backend, even for a guest: reading a file the user picked. */
+export async function callLocal<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (isDesktop) return invoke<T>(command, args);
   let res: Response;
   try {
@@ -63,11 +82,23 @@ export async function pickFiles(label: string, extensions: string[]): Promise<Pi
 
 export async function readPickedText(picked: PickedFile): Promise<string> {
   if (picked.file) return picked.file.text();
-  return new TextDecoder().decode(await call<ArrayBuffer>("read_binary", { path: picked.path }));
+  return new TextDecoder().decode(await callLocal<ArrayBuffer>("read_binary", { path: picked.path }));
+}
+
+function base64(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = "";
+  for (let i = 0; i < view.length; i += 0x8000) binary += String.fromCharCode(...view.subarray(i, i + 0x8000));
+  return btoa(binary);
 }
 
 /** Copies an image into the project's figures/ and returns its project-relative path. */
 export async function importPickedFigure(dir: string, picked: PickedFile): Promise<string> {
+  if (remote) {
+    // The host cannot read this machine's paths: the bytes travel instead.
+    const bytes = picked.file ? await picked.file.arrayBuffer() : await callLocal<ArrayBuffer>("read_binary", { path: picked.path });
+    return call<string>("figure_import_bytes", { dir, name: picked.name, data: base64(bytes) });
+  }
   if (picked.path) return call<string>("figure_import", { dir, source: picked.path });
   const res = await fetch("/api/_upload", {
     method: "POST",

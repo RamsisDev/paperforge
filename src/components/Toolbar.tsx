@@ -58,6 +58,7 @@ import {
   useStore,
   type EditorMode,
 } from "@/store";
+import { ShareButton } from "./ShareDialog";
 import { notify } from "./Toaster";
 import { Button, IconButton, MENU_SEPARATOR, MOD, Menu, SHIFT, cx, type MenuItem } from "./ui";
 
@@ -190,6 +191,7 @@ export function Toolbar() {
   const compiling = useStore((s) => s.compile.state === "running");
   const reviewMode = useStore((s) => s.reviewMode);
   const trackChanges = useStore((s) => s.trackChanges);
+  const guest = useStore((s) => s.collab?.role === "guest");
   const editingMarkdown = useStore((s) => isPartFile(s.activeFile));
   const chapters = unitName(meta?.template) === "chapter";
   const headingLabels: Partial<Record<Action, string>> = chapters ? { h1: "Chapter", h2: "Section" } : {};
@@ -262,11 +264,17 @@ export function Toolbar() {
         className={cx("shrink-0", reviewMode && "bg-accent-soft text-accent hover:bg-accent-soft hover:text-accent")}
         aria-pressed={reviewMode}
         aria-label="Review"
+        disabled={guest}
         onClick={() => setReviewMode(!reviewMode)}
-        title="Review: the preview and Typeset show comments with their notes and tracked changes. Export PDF stays final, with every change accepted."
+        title={
+          guest
+            ? "The shared preview is the host's final PDF"
+            : "Review: the preview and Typeset show comments with their notes and tracked changes. Export PDF stays final, with every change accepted."
+        }
       >
         <MessageSquareText size={14} /> <span className="hidden xl:inline">Review</span>
       </Button>
+      <ShareButton />
       <Button
         variant="ghost"
         className="shrink-0"
@@ -279,26 +287,33 @@ export function Toolbar() {
       <Button
         variant="primary"
         className="shrink-0"
+        disabled={guest}
         onClick={() => run(() => compileNow("full"))}
-        title={`Save and typeset (${MOD}S)`}
+        title={guest ? "The host typesets the shared paper for everyone as you type" : `Save and typeset (${MOD}S)`}
       >
         {compiling ? <LoaderCircle size={14} className="animate-spin" /> : <Play size={14} />}
         Typeset
       </Button>
-      <Menu
-        className="shrink-0"
-        trigger={
-          <Button aria-haspopup="menu">
-            <FileDown size={14} /> Export <ChevronDown size={13} className="text-faint" />
-          </Button>
-        }
-        items={[
-          { label: "PDF…", icon: <FileDown size={14} />, shortcut: `${MOD}${SHIFT}E`, onSelect: () => run(exportPdf) },
-          { label: "Review PDF…", icon: <MessageSquareText size={14} />, hint: "with comments and changes", onSelect: () => run(exportReviewPdf) },
-          { label: "LaTeX sources (.zip)…", icon: <FileArchive size={14} />, onSelect: () => run(exportLatex) },
-          { label: "Show project folder", icon: <FolderOpen size={14} />, onSelect: () => run(revealProject) },
-        ]}
-      />
+      {guest ? (
+        <Button className="shrink-0" disabled title="Only the host can export the shared paper">
+          <FileDown size={14} /> Export
+        </Button>
+      ) : (
+        <Menu
+          className="shrink-0"
+          trigger={
+            <Button aria-haspopup="menu">
+              <FileDown size={14} /> Export <ChevronDown size={13} className="text-faint" />
+            </Button>
+          }
+          items={[
+            { label: "PDF…", icon: <FileDown size={14} />, shortcut: `${MOD}${SHIFT}E`, onSelect: () => run(exportPdf) },
+            { label: "Review PDF…", icon: <MessageSquareText size={14} />, hint: "with comments and changes", onSelect: () => run(exportReviewPdf) },
+            { label: "LaTeX sources (.zip)…", icon: <FileArchive size={14} />, onSelect: () => run(exportLatex) },
+            { label: "Show project folder", icon: <FolderOpen size={14} />, onSelect: () => run(revealProject) },
+          ]}
+        />
+      )}
       <IconButton
         className="shrink-0"
         label={theme === "dark" ? "Light theme" : "Dark theme"}
@@ -306,7 +321,7 @@ export function Toolbar() {
       >
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </IconButton>
-      <IconButton className="shrink-0" label="Close project" onClick={() => run(closeProject)}>
+      <IconButton className="shrink-0" label={guest ? "Leave session" : "Close project"} onClick={() => run(closeProject)}>
         <LogOut size={15} />
       </IconButton>
     </header>

@@ -1,6 +1,7 @@
 import { notify } from "@/components/Toaster";
 import { api, baseName, joinPath, type TemplateId } from "@/lib/api";
 import { pickFolder, revealInFileManager, saveOutput } from "@/lib/platform";
+import { isGuest } from "@/collab/live";
 import { versionAfterExport } from "@/history";
 import { compileNow, leaveProject, loadProject } from "@/session";
 import { store } from "@/store";
@@ -17,6 +18,10 @@ function slug(title: string): string {
 }
 
 async function freshBuild(review = false): Promise<boolean> {
+  if (isGuest()) {
+    notify("Only the host can export the shared paper.", "error");
+    return false;
+  }
   const ok = await compileNow("full", review);
   if (!ok) {
     notify("The paper has errors; fix them before exporting.", "error");

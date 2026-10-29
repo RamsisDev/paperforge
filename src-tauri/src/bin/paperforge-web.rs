@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use paperforge_lib::backend::{Backend, Reply};
+use paperforge_lib::collab;
 use paperforge_lib::compiler::Toolchain;
 use paperforge_lib::project;
 use serde_json::{Value, json};
@@ -169,7 +170,9 @@ async fn main() {
             std::process::exit(1);
         }
     }
-    let backend = Arc::new(Backend::new(tc, None, manifest().join("resources/sample")));
+    let backend = Backend::new(tc, None, manifest().join("resources/sample"));
+    // Guests who open an invitation link get the last `npm run build`.
+    backend.set_assets(collab::dist_assets(manifest().join("../dist")));
     let server = Server::http(ADDR).unwrap_or_else(|e| {
         eprintln!("cannot listen on {ADDR}: {e}");
         std::process::exit(1);

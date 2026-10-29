@@ -2,6 +2,7 @@
 // linked to the project. Its entries are merged into refs.bib, so compiling never depends on it.
 
 import { notify } from "@/components/Toaster";
+import { isGuest } from "@/collab/live";
 import { api } from "@/lib/api";
 import { mergeBib } from "@/lib/bib";
 import { isDesktop } from "@/lib/platform";
@@ -58,9 +59,10 @@ export async function watchZotero(dir: string): Promise<boolean> {
   return true;
 }
 
-// Opening a project starts its watcher and catches up with changes made while it was closed.
+// Opening a project starts its watcher and catches up with changes made while it was closed. The
+// host's window watches a shared paper's link.
 useStore.subscribe((s, prev) => {
-  if (!s.dir || s.dir === prev.dir) return;
+  if (!s.dir || s.dir === prev.dir || isGuest()) return;
   void watchZotero(s.dir)
     .then((watching) => (watching ? autoSync() : undefined))
     .catch((e) => notify(`Zotero link: ${String(e)}`, "error"));

@@ -251,9 +251,24 @@ export const api = {
   /** Brings one part back, re-inserting it when it was deleted since. */
   historyRestorePart: (dir: string, id: string, file: string) =>
     invoke<ProjectSnapshot>("history_restore_part", { dir, id, file }),
+  /** Shares the project on the local network; returns the invitation. */
+  collabStart: (dir: string) => invoke<CollabInfo>("collab_start", { dir }),
+  collabStop: () => invoke<void>("collab_stop"),
   /** Desktop: quits the app, once pending edits are saved. */
   appQuit: () => invoke<void>("app_quit"),
 };
+
+export interface CollabInfo {
+  /** e.g. "60N00J-A1D003-ZGF01A": the host's address, port and the session secret. */
+  code: string;
+  /** Opens the session in a browser: `http://<ip>:<port>/#join=<code>`. */
+  link: string;
+  address: string;
+  port: number;
+  /** Lets this window join its own session as host. */
+  hostKey: string;
+  maxPeers: number;
+}
 
 /** "own": enabled by PaperForge; "adopted": the folder already was a git repository. */
 export type RepoMode = "own" | "adopted" | "parentRepo" | "none";

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -12,6 +12,7 @@ use tokio::sync::OnceCell;
 use tokio::task::AbortHandle;
 
 use crate::bibfetch;
+use crate::collab::{self, Session};
 use crate::compiler::{self, CompileMode, CompileOutcome, Toolchain};
 use crate::history;
 use crate::project::{self, PaperMeta};
@@ -36,6 +37,12 @@ pub struct Backend {
     /// One lock per project folder, held by writes and history commands, so a snapshot never sees
     /// a half-written multi-file change.
     projects: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The project shared on the local network, if any.
+    collab: Mutex<Option<Arc<Session>>>,
+    /// The frontend, served to guests who join from a browser.
+    assets: OnceLock<collab::Assets>,
+    /// Guests' commands reach `dispatch` through the session, which holds this.
+    me: Weak<Backend>,
 }
 
 /// Commands that write the project or read it as a whole; they run under the project lock.
@@ -64,6 +71,24 @@ const LOCKED: [&str; 26] = [
     "history_label",
     "history_diff",
     "history_read_part",
+    "history_restore",
+    "history_restore_part",
+];
+
+/// Commands that change what other participants see; a shared session re-reads the project after
+/// them and sends it to everyone.
+const MUTATING: [&str; 13] = [
+    "project_save",
+    "part_create",
+    "part_delete",
+    "parts_reorder",
+    "part_split",
+    "parts_merge",
+    "figure_import",
+    "figure_import_bytes",
+    "preamble_save",
+    "template_eject",
+    "template_restore",
     "history_restore",
     "history_restore_part",
 ];
@@ -134,8 +159,8 @@ pub fn startup_project_from_args() -> Option<String> {
 }
 
 impl Backend {
-    pub fn new(toolchain: Toolchain, seed_cache: Option<PathBuf>, sample_dir: PathBuf) -> Self {
-        Self {
+    pub fn new(toolchain: Toolchain, seed_cache: Option<PathBuf>, sample_dir: PathBuf) -> Arc<Self> {
+        Arc::new_cyclic(|me| Self {
             toolchain,
             seed_cache,
             sample_dir,
@@ -145,7 +170,45 @@ impl Backend {
             build_lock: Arc::new(tokio::sync::Mutex::new(())),
             synctex: Mutex::new(None),
             projects: Mutex::new(HashMap::new()),
+            collab: Mutex::new(None),
+            assets: OnceLock::new(),
+            me: me.clone(),
+        })
+    }
+
+    pub fn set_assets(&self, assets: collab::Assets) {
+        let _ = self.assets.set(assets);
+    }
+
+    /// The session sharing `dir`, if it is shared.
+    pub(crate) fn shared(&self, dir: Option<&str>) -> Option<Arc<Session>> {
+        let dir = dir?;
+        self.collab.lock().unwrap().as_ref().filter(|s| s.shares(dir)).cloned()
+    }
+
+    /// Shares the project in `dir`, ending any other shared session first.
+    pub async fn collab_start(&self, dir: String) -> Result<collab::Info, String> {
+        if let Some(session) = self.shared(Some(&dir)) {
+            return Ok(session.info());
         }
+        self.collab_stop().await;
+        project::read_meta(Path::new(&dir))?;
+        let session =
+            Session::start(PathBuf::from(&dir), self.project_lock(&dir), self.me.clone(), self.assets.get().cloned()).await?;
+        let info = session.info();
+        *self.collab.lock().unwrap() = Some(session);
+        Ok(info)
+    }
+
+    pub async fn collab_stop(&self) {
+        let session = self.collab.lock().unwrap().take();
+        if let Some(session) = session {
+            session.stop().await;
+        }
+    }
+
+    pub fn collab_status(&self) -> Option<collab::Info> {
+        self.collab.lock().unwrap().as_ref().map(|s| s.info())
     }
 
     fn project_lock(&self, dir: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -196,6 +259,15 @@ impl Backend {
         review: bool,
     ) -> Result<CompileOutcome, String> {
         self.ensure_cache().await?;
+        // A shared project compiles from the rooms' latest text; guests get the full final preview.
+        let shared = self.shared(Some(&dir));
+        if let Some(session) = &shared {
+            session.flush().await;
+        }
+        let shared = shared.filter(|_| !review && focus.is_none());
+        if let Some(session) = &shared {
+            session.publish_compiling();
+        }
         let toolchain = self.toolchain.clone();
         let lock = self.build_lock.clone();
         let task = tokio::spawn(async move {
@@ -205,11 +277,21 @@ impl Backend {
         if let Some(previous) = self.running.lock().unwrap().replace(task.abort_handle()) {
             previous.abort();
         }
-        match task.await {
+        let outcome = match task.await {
             Ok(outcome) => outcome,
             Err(e) if e.is_cancelled() => Ok(CompileOutcome::cancelled()),
             Err(e) => Err(e.to_string()),
+        };
+        if let (Some(session), Ok(out)) = (&shared, &outcome)
+            && !out.cancelled
+        {
+            let pdf = match (&out.pdf_path, out.ok) {
+                (Some(path), true) => tokio::fs::read(path).await.ok(),
+                _ => None,
+            };
+            session.publish_compile(serde_json::to_value(out).unwrap_or_default(), pdf);
         }
+        outcome
     }
 
     /// The SyncTeX data of the project's last compile in `build`, `None` before the first one.
@@ -261,7 +343,44 @@ impl Backend {
     }
 
     /// Runs a command by its IPC name with JSON arguments named as the frontend sends them.
-    pub async fn dispatch(&self, command: &str, args: Value) -> Result<Reply, String> {
+    pub async fn dispatch(&self, command: &str, mut args: Value) -> Result<Reply, String> {
+        let dir = args.get("dir").and_then(Value::as_str).map(str::to_string);
+        let lock = match &dir {
+            Some(dir) if LOCKED.contains(&command) => Some(self.project_lock(dir)),
+            _ => None,
+        };
+        let _guard = match &lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        let Some(session) = self.shared(dir.as_deref()) else { return self.run(command, args).await };
+
+        // Shared parts and refs.bib belong to the session: a whole-file save becomes a diff.
+        if command == "part_save"
+            && let (Some(file), Some(content)) = (args["file"].as_str(), args["content"].as_str())
+            && session.replace_text(file, content)
+        {
+            return Ok(Reply::Json(Value::Null));
+        }
+        if command == "project_save"
+            && let Some(fields) = args.as_object_mut()
+        {
+            fields.insert("bib".into(), Value::Null);
+        }
+        if lock.is_some() {
+            session.flush_held();
+        } else if command == "export_zip" {
+            session.flush().await;
+        }
+        let result = self.run(command, args).await;
+        if result.is_ok() && MUTATING.contains(&command) {
+            session.resync_held();
+            session.broadcast_snapshot();
+        }
+        result
+    }
+
+    async fn run(&self, command: &str, args: Value) -> Result<Reply, String> {
         fn parse<T: DeserializeOwned>(args: Value) -> Result<T, String> {
             serde_json::from_value(args).map_err(|e| format!("bad arguments: {e}"))
         }
@@ -441,14 +560,10 @@ impl Backend {
             file: String,
         }
 
-        let lock = match args.get("dir").and_then(Value::as_str) {
-            Some(dir) if LOCKED.contains(&command) => Some(self.project_lock(dir)),
-            _ => None,
-        };
-        let _guard = match &lock {
-            Some(lock) => Some(lock.lock().await),
-            None => None,
-        };
+        #[derive(Deserialize)]
+        struct CollabStart {
+            dir: String,
+        }
 
         match command {
             "engine_info" => json(self.engine_info()),
@@ -625,6 +740,12 @@ impl Backend {
                 let a: VersionFile = parse(args)?;
                 json(blocking(move || history::restore_part(Path::new(&a.dir), &a.id, &a.file)).await?)
             }
+            "collab_start" => json(self.collab_start(parse::<CollabStart>(args)?.dir).await?),
+            "collab_stop" => {
+                self.collab_stop().await;
+                json(())
+            }
+            "collab_status" => json(self.collab_status()),
             // The browser has no app to quit; closing the tab is enough.
             "app_quit" => json(()),
             other => Err(format!("unknown command '{other}'")),
@@ -633,7 +754,7 @@ impl Backend {
 }
 
 /// Every command the frontend may call; the desktop handler list and `dispatch` must both cover it.
-pub const COMMANDS: [&str; 43] = [
+pub const COMMANDS: [&str; 46] = [
     "engine_info",
     "startup_project",
     "project_create",
@@ -676,6 +797,9 @@ pub const COMMANDS: [&str; 43] = [
     "history_read_part",
     "history_restore",
     "history_restore_part",
+    "collab_start",
+    "collab_stop",
+    "collab_status",
     "app_quit",
 ];
 
@@ -683,7 +807,7 @@ pub const COMMANDS: [&str; 43] = [
 mod tests {
     use super::*;
 
-    fn backend() -> Backend {
+    fn backend() -> Arc<Backend> {
         let tmp = std::env::temp_dir();
         Backend::new(
             Toolchain {
