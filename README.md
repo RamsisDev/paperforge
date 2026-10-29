@@ -1,4 +1,6 @@
-# PaperForge
+<p align="center">
+  <img src="assets/paperforge-logo.png" alt="PaperForge" width="480">
+</p>
 
 A desktop editor that turns Markdown papers into journal-ready PDFs. Write in Markdown, pick a
 template (article, IEEE, ACM, Elsevier, LNCS, report, book) and PaperForge typesets it locally with
