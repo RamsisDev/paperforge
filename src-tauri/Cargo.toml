@@ -3,6 +3,7 @@ name = "paperforge"
 version = "0.1.0"
 description = "Local editor that typesets Markdown papers with journal LaTeX templates"
 authors = ["PaperForge"]
+license = "PolyForm-Noncommercial-1.0.0"
 edition = "2024"
 default-run = "paperforge"
 

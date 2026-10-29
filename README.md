@@ -98,3 +98,12 @@ or on demand (`make ci`) and uploads the installers as workflow artifacts.
 | `docs/` | User docs and design plans (`docs/plans/`) |
 | `e2e/` | Browser checks against the real backend |
 | `scripts/` | Sidecar download and the browser dev runner |
+
+## License
+
+PaperForge is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). You
+may use, modify and share it for any noncommercial purpose: personal use, study, research, and
+use by charities, schools and public institutions. Selling it or using it for commercial gain is
+not permitted. For commercial licensing, contact the author.
+
+Bundled third-party components keep their own licenses; see [THIRD_PARTY.md](THIRD_PARTY.md).
